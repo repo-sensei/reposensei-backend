@@ -33,40 +33,51 @@ router.post('/scan', async (req, res) => {
     }
 
     // 3) AST parse all source files
-    const files = collectSourceFiles(repoPath);
-    for (const file of files) {
-      const nodes = parseFile(file);
-      for (const node of nodes) {
-        await NodeModel.create({
-          repoId,
-          nodeId: node.nodeId,
-          filePath: node.filePath,
-          startLine: node.startLine,
-          endLine: node.endLine,
-          type: node.type,
-          name: node.name,
-          complexity: node.complexity,
-          calledFunctions: node.calledFunctions
-        });
-        // Embed node source snippet
-        const srcContent = fs.readFileSync(node.filePath, 'utf-8');
-        const snippet = srcContent
-          .split('\n')
-          .slice(node.startLine - 1, node.endLine)
-          .join('\n');
-        await upsertCodeEmbedding(repoId, 'node', node.nodeId, snippet, {
-          filePath: node.filePath
-        });
-      }
-    }
+    // After fetching commits
+  console.log(`Fetched ${commits.length} commits`);
 
-    // 4) Save repo metadata
-    await Repo.create({
-      repoId,
-      repoUrl,
-      userId,
-      lastScanned: new Date()
-    });
+  // AST parsing step
+  const files = collectSourceFiles(repoPath);
+  console.log(`Collected ${files.length} source files`);
+
+  for (const file of files) {
+    
+    const nodes = parseFile(file);
+   
+
+    for (const node of nodes) {
+     
+      await NodeModel.create({
+        repoId,
+        nodeId: node.nodeId,
+        filePath: node.filePath,
+        startLine: node.startLine,
+        endLine: node.endLine,
+        type: node.type,
+        name: node.name,
+        complexity: node.complexity,
+        calledFunctions: node.calledFunctions
+      });
+
+      const srcContent = fs.readFileSync(node.filePath, 'utf-8');
+      const snippet = srcContent
+        .split('\n')
+        .slice(node.startLine - 1, node.endLine)
+        .join('\n');
+
+      await upsertCodeEmbedding(repoId, 'node', node.nodeId, snippet, {
+        filePath: node.filePath
+      });
+    }
+  }
+
+  console.log('Saving repo metadata');
+  await Repo.create({
+    repoId,
+    repoUrl,
+    userId,
+    lastScanned: new Date()
+  });
 
     return res.status(200).json({ success: true, message: 'Repo scanned successfully.' });
   } catch (err) {
