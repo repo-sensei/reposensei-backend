@@ -1,0 +1,30 @@
+{
+  "name": "reposensei-backend",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@babel/parser": "^7.27.5",
+    "@babel/traverse": "^7.27.4",
+    "@babel/types": "^7.27.3",
+    "@mermaid-js/mermaid-cli": "^11.4.2",
+    "@supabase/supabase-js": "^2.49.10",
+    "axios": "^1.9.0",
+    "child_process": "^1.0.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
+    "fs-extra": "^11.3.0",
+    "mongoose": "^8.15.1",
+    "simple-git": "^3.27.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
