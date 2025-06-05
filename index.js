@@ -1,14 +1,14 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-const connectDB = require('./config/db');
+const connectDB = require('./src/config/db');
 
-const repoRouter = require('./controllers/repoController');
-const docsRouter = require('./controllers/docsController');
-const tasksRouter = require('./controllers/tasksController');
-const changeRouter = require('./controllers/changeController');
-const chatRouter = require('./controllers/chatController');
-const webhookRouter = require('./controllers/webhookController');
+const repoRouter = require('./src/controllers/repoController');
+const docsRouter = require('./src/controllers/docsController');
+const tasksRouter = require('./src/controllers/tasksController');
+const changeRouter = require('./src/controllers/changeController');
+const chatRouter = require('./src/controllers/chatController');
+const webhookRouter = require('./src/controllers/webhookController');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
