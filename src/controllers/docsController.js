@@ -11,6 +11,7 @@ router.get('/architecture/:repoId', async (req, res) => {
   try {
     const { repoId } = req.params;
     const mermaidFile = await generateMermaidGraph(repoId);
+    
     // Option A: return Mermaid code so frontend can render it
     const mermaidCode = await fs.promises.readFile(mermaidFile, 'utf-8');
     return res.status(200).json({ success: true, mermaid: mermaidCode });

@@ -1,8 +1,7 @@
-const CommitModel = require('../models/Commit');
+const CommitModel = require('../models/Commit'); 
 const axios = require('axios');
 
 async function summarizeChanges(repoId, sinceDate) {
-  // Fetch commits after sinceDate
   const recentCommits = await CommitModel.find({ repoId, date: { $gt: sinceDate } });
   if (recentCommits.length === 0) return 'No new changes since last scan.';
 
@@ -10,19 +9,22 @@ async function summarizeChanges(repoId, sinceDate) {
     .map(c => `- ${c.message} (by ${c.author})`)
     .join('\n');
 
-  const prompt = `
+  const promptAI = `
 You are a senior engineer. Here are recent commit messages since ${sinceDate.toDateString()}:
 ${changesText}
 
-Write a 200-word summary describing what changed in this repository since ${sinceDate.toDateString()}. Focus on high-level features or refactors. Output only the summary text.
+Write a 200-word summary using pointers describing what changed in this repository. Focus on high-level features or refactors. Output only the summary text.
   `;
 
-  const llmRes = await axios.post(
-    process.env.LLM_API_URL,
-    { inputs: prompt },
-    { headers: { Authorization: `Bearer ${process.env.LLM_API_TOKEN}` } }
-  );
-  return llmRes.data;
+
+  try {
+    const res = await axios.post(`${process.env.PYTHON_BACKEND_URL}/summarize`, { prompt: promptAI });
+    
+    return res.data.summary;
+  } catch (error) {
+    console.error('Error calling Python backend summarizer:', error);
+    throw error;
+  }
 }
 
 module.exports = { summarizeChanges };

@@ -31,35 +31,100 @@ async function generateOnboardingTasks({ repoId, repoPath }) {
     isCompleted: false
   });
 
-  // 2) Architecture overview via LLM
-  const readmeContent = readReadme(repoPath).substring(0, 3000);
-  const archPrompt = `
-You are a senior developer. Given this README excerpt:
-\`\`\`
+  // 2) Architecture overview via Python Ollama backend
+const readmeContent = readReadme(repoPath).substring(0, 3000);
+
+const archPrompt = `
+You are an expert senior developer onboarding a new team member. 
+Given the following README excerpt, provide a concise 10-sentence summary of the repository’s architecture, including frontend/backend, key modules, and important areas a newcomer should focus on. 
+Also, list 3 suggested first tasks for onboarding based on this architecture. 
+
+Return only valid JSON in this exact format, with no extra text or duplicated keys: 
+{
+  "overview": "...",
+  "suggestedTasks": [
+    "Task 1 description",
+    "Task 2 description",
+    "Task 3 description"
+  ]
+}
+
+README excerpt:
+"""
 ${readmeContent}
-\`\`\`
-Write a 10-sentence overview of the repository’s architecture (frontend/backend and key modules). Output JSON: { "overview": "..." }.
+"""
 `;
-  const archRes = await axios.post(
-    process.env.LLM_API_URL,
-    { inputs: archPrompt },
-    { headers: { Authorization: `Bearer ${process.env.LLM_API_TOKEN}` } }
-  );
-  let archOverview = '';
-  try {
-    const json = JSON.parse(archRes.data);
-    archOverview = json.overview;
-  } catch {
-    archOverview = archRes.data;
+
+
+
+let archOverview = '';
+try {
+  const response = await axios.post(`${process.env.PYTHON_BACKEND_URL}/generate-architecture`, {
+    prompt: archPrompt
+  });
+  const data = response.data;
+ 
+
+  if (data.success) {
+    let cleaned = data.response.trim();
+
+    // 🧹 Remove Markdown code block if present
+    if (cleaned.startsWith('```json')) {
+      cleaned = cleaned.replace(/^```json/, '').replace(/```$/, '').trim();
+    }
+
+    const parsed = JSON.parse(cleaned);
+    archOverview = parsed.overview;
+
+    // ✅ Add main architecture overview task
+    tasks.push({
+      repoId,
+      title: 'Review architecture overview',
+      description: archOverview,
+      command: '# Read the architecture overview above carefully',
+      fileLink: null,
+      isCompleted: false
+    });
+
+    // ✅ Add suggested tasks from the response
+    if (Array.isArray(parsed.suggestedTasks)) {
+      parsed.suggestedTasks.forEach((taskText, index) => {
+        tasks.push({
+          repoId,
+          title: `Suggested Task ${index + 1}`,
+          description: taskText,
+          command: `# ${taskText}`,
+          fileLink: null,
+          isCompleted: false
+        });
+      });
+    }
+
+  } else {
+    archOverview = `Error generating overview: ${data.error}`;
+
+    tasks.push({
+      repoId,
+      title: 'Error generating architecture overview',
+      description: archOverview,
+      command: '# Check backend logs or prompt format',
+      fileLink: null,
+      isCompleted: false
+    });
   }
+} catch (err) {
+  archOverview = `Failed to call Python backend: ${err.message}`;
+
   tasks.push({
     repoId,
-    title: 'Review architecture overview',
+    title: 'Backend call failed',
     description: archOverview,
-    command: '',
+    command: '# Check network or backend server',
     fileLink: null,
     isCompleted: false
   });
+}
+
 
   // 3) Starter issue from GitHub issues (if public)
   let issueTask = null;
