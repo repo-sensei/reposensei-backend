@@ -6,8 +6,9 @@ const exec = require('child_process').exec;
 // Generate Mermaid flowchart code for top‐N complex nodes
 async function generateMermaidGraph(repoId) {
   const nodes = await NodeModel.find({ repoId });
+  
   // Take top 30 by complexity
-  const topNodes = nodes.sort((a, b) => b.complexity - a.complexity).slice(0, 30);
+  const topNodes = nodes.sort((a, b) => b.complexity - a.complexity).slice(0, 50);
 
   let mermaidCode = 'graph LR\n';
   topNodes.forEach((n) => {
@@ -16,9 +17,11 @@ async function generateMermaidGraph(repoId) {
     n.calledFunctions.forEach((cf) => {
       const calledName = cf.split('::')[1];
       const calledLabel = calledName.replace(/[^a-zA-Z0-9]/g, '_');
-      mermaidCode += `  ${nodeLabel} --> ${calledLabel}\n`;
+      mermaidCode += `  ${calledLabel} --> ${nodeLabel}\n`;
     });
   });
+
+  
 
   try {
     const outDir = path.join(__dirname, '../../docs/generated');
