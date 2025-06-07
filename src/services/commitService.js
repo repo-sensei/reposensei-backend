@@ -1,8 +1,8 @@
-const { getCommitHistory } = require('./gitService');
+const { getRecentCommitsWithFiles } = require('./gitService');
 
 async function fetchCommits(repoPath) {
-  const commits = await getCommitHistory(repoPath);
-  return commits; // array of { sha, message, author, date }
+  const commits = await getRecentCommitsWithFiles(repoPath);
+  return commits;
 }
 
 module.exports = { fetchCommits };

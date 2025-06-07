@@ -1,9 +1,10 @@
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
 const Repo = require('../models/Repo');
 const NodeModel = require('../models/Node');
 const CommitModel = require('../models/Commit');
-const { cloneRepo, getCommitHistory } = require('../services/gitService');
+const { ensureRepoCloned, getRecentCommitsWithFiles } = require('../services/gitService');
 const { collectSourceFiles, parseFile } = require('../services/astService');
 const { upsertCodeEmbedding } = require('../services/vectorService');
 
@@ -13,75 +14,116 @@ const router = express.Router();
 router.post('/scan', async (req, res) => {
   try {
     const { repoUrl, repoId, userId } = req.body;
-    // 1) Clone
-    const repoPath = await cloneRepo(repoUrl, repoId);
+    if (!repoUrl || !repoId || !userId) {
+      return res
+        .status(400)
+        .json({ success: false, message: 'Missing repoUrl, repoId, or userId' });
+    }
 
-    // 2) Fetch commits
-    const commits = await getCommitHistory(repoPath);
+    // 1) Clone (or pull) the repository locally
+    const repoPath = await ensureRepoCloned(repoUrl, repoId);
+
+    // 2) Fetch commits (up to 50) including filesChanged
+    //    Each returned object should be: { sha, author, date, message, filesChanged: [ ... ] }
+    const commits = await getRecentCommitsWithFiles(repoPath);
+
+    console.log(`Fetched ${commits.length} commits`);
+
+    // 3) Insert each commit into Mongo + embed commit message & filesChanged
     for (const c of commits) {
-      await CommitModel.create({
+      // Upsert to avoid duplicates on sha
+      await CommitModel.updateOne(
+        { sha: c.sha },
+        {
+          $setOnInsert: {
+            repoId,
+            sha: c.sha,
+            message: c.message,
+            author: c.author,
+            date: new Date(c.date),
+            filesChanged: c.filesChanged || []
+          }
+        },
+        { upsert: true }
+      );
+
+      // Embed commit message (and optionally metadata) into Supabase
+      await upsertCodeEmbedding(
         repoId,
-        sha: c.sha,
-        message: c.message,
-        author: c.author,
-        date: new Date(c.date)
-      });
-      await upsertCodeEmbedding(repoId, 'commit', c.sha, c.message, {
-        author: c.author,
-        date: c.date
-      });
+        'commit',
+        c.sha,
+        c.message,
+        {
+          author: c.author,
+          date: c.date,
+          files: c.filesChanged || []
+        }
+      );
     }
 
-    // 3) AST parse all source files
-    // After fetching commits
-  console.log(`Fetched ${commits.length} commits`);
+    // 4) AST‐parse all source files and insert nodes + embeddings
+    const files = collectSourceFiles(repoPath);
+    console.log(`Collected ${files.length} source files`);
 
-  // AST parsing step
-  const files = collectSourceFiles(repoPath);
-  console.log(`Collected ${files.length} source files`);
+    for (const file of files) {
+      // Remove existing nodes for this file so we can re‐insert fresh
+      await NodeModel.deleteMany({ filePath: file });
 
-  for (const file of files) {
-    
-    const nodes = parseFile(file);
-   
+      // Parse functions/classes in this file
+      const nodes = parseFile(file);
 
-    for (const node of nodes) {
-     
-      await NodeModel.create({
-        repoId,
-        nodeId: node.nodeId,
-        filePath: node.filePath,
-        startLine: node.startLine,
-        endLine: node.endLine,
-        type: node.type,
-        name: node.name,
-        complexity: node.complexity,
-        calledFunctions: node.calledFunctions
-      });
+      for (const node of nodes) {
+        // Save node document
+        await NodeModel.create({
+          repoId,
+          nodeId: node.nodeId,
+          filePath: node.filePath,
+          startLine: node.startLine,
+          endLine: node.endLine,
+          type: node.type,
+          name: node.name,
+          complexity: node.complexity,
+          calledFunctions: node.calledFunctions
+        });
 
-      const srcContent = fs.readFileSync(node.filePath, 'utf-8');
-      const snippet = srcContent
-        .split('\n')
-        .slice(node.startLine - 1, node.endLine)
-        .join('\n');
+        // Extract the snippet lines corresponding to this node
+        const srcContent = fs.readFileSync(file, 'utf-8');
+        const snippet = srcContent
+          .split('\n')
+          .slice(node.startLine - 1, node.endLine)
+          .join('\n');
 
-      await upsertCodeEmbedding(repoId, 'node', node.nodeId, snippet, {
-        filePath: node.filePath
-      });
+        // Embed the snippet into Supabase for vector search
+        await upsertCodeEmbedding(
+          repoId,
+          'node',
+          node.nodeId,
+          snippet,
+          { filePath: node.filePath }
+        );
+      }
     }
-  }
 
-  console.log('Saving repo metadata');
-  await Repo.create({
-    repoId,
-    repoUrl,
-    userId,
-    lastScanned: new Date()
-  });
+    // 5) Save/update the Repo document with lastScanned timestamp
+    //    If a Repo doc already exists with this repoId, overwrite lastScanned
+    await Repo.updateOne(
+      { repoId },
+      {
+        $set: {
+          repoUrl,
+          userId,
+          lastScanned: new Date()
+        }
+      },
+      { upsert: true }
+    );
 
-    return res.status(200).json({ success: true, message: 'Repo scanned successfully.' });
+    console.log('Repository metadata saved');
+    return res
+      .status(200)
+      .json({ success: true, message: 'Repo scanned successfully.' });
   } catch (err) {
-    console.error(err);
+    console.error('Error in /api/repo/scan:', err);
     return res
       .status(500)
       .json({ success: false, message: 'Scan failed.', error: err.message });
@@ -92,10 +134,16 @@ router.post('/scan', async (req, res) => {
 router.get('/list', async (req, res) => {
   try {
     const { userId } = req.query;
+    if (!userId) {
+      return res
+        .status(400)
+        .json({ success: false, message: 'Missing userId query parameter' });
+    }
+
     const repos = await Repo.find({ userId });
     return res.status(200).json({ success: true, repos });
   } catch (err) {
-    console.error(err);
+    console.error('Error in /api/repo/list:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });

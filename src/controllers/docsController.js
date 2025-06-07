@@ -1,25 +1,31 @@
 const express = require('express');
-const { generateMermaidGraph, renderMermaidToSvg } = require('../services/diagramService');
-const { computeHotspots } = require('../services/debtService');
-const path = require('path');
 const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { generateDotGraph, renderDotToSvg } = require('../services/diagramService');
+const { computeHotspots } = require('../services/debtService');
 
 const router = express.Router();
 
+// NOTE: In your main app (e.g. index.js), serve the generated SVGs as static:
+// app.use('/generated', express.static(path.join(__dirname, '../docs/generated')));
+
 // GET /api/docs/architecture/:repoId
+// Generates the Graphviz SVG and returns its public URL for client-side rendering
 router.get('/architecture/:repoId', async (req, res) => {
   try {
     const { repoId } = req.params;
-    const mermaidFile = await generateMermaidGraph(repoId);
-    
-    // Option A: return Mermaid code so frontend can render it
-    const mermaidCode = await fs.promises.readFile(mermaidFile, 'utf-8');
-    return res.status(200).json({ success: true, mermaid: mermaidCode });
-    // Option B: return SVG URL if you rendered it
-    // const svgFile = await renderMermaidToSvg(mermaidFile);
-    // return res.status(200).json({ success: true, svgUrl: `/generated/${repoId}-graph.svg` });
+    // 1) Generate .dot file
+    const dotFile = await generateDotGraph(repoId);
+    // 2) Render to SVG
+    const svgFile = await renderDotToSvg(dotFile);
+    // 3) Build a public URL (assumes /generated is statically served)
+    const fileName = path.basename(svgFile);
+    const svgUrl = `/generated/${fileName}`;
+
+    return res.status(200).json({ success: true, svgUrl });
   } catch (err) {
-    console.error(err);
+    console.error('Error in /api/docs/architecture:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -28,13 +34,11 @@ router.get('/architecture/:repoId', async (req, res) => {
 router.get('/hotspots/:repoId', async (req, res) => {
   try {
     const { repoId } = req.params;
-    // Assume the repo was cloned to a temp folder by repoController
-    // const tmpBase = path.join(os.tmpdir(), 'reposensei'); const repoPath = path.join(tmpBase, repoId); -> inside gitService.js
-    const repoPath = path.join(require('os').tmpdir(), 'reposensei', repoId);
+    const repoPath = path.join(os.tmpdir(), 'reposensei', repoId);
     const hotspots = await computeHotspots(repoId, repoPath);
     return res.status(200).json({ success: true, hotspots });
   } catch (err) {
-    console.error(err);
+    console.error('Error in /api/docs/hotspots:', err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });

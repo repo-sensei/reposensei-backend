@@ -1,41 +1,178 @@
+// src/services/taskService.js
+
 const fs = require('fs');
 const path = require('path');
-const NodeModel = require('../models/Node');
-const CommitModel = require('../models/Commit');
-const TaskModel = require('../models/Task');
 const axios = require('axios');
+const parser = require('@babel/parser');
+const traverse = require('@babel/traverse').default;
+const TaskModel = require('../models/Task');
 
-// Helper to read README if exists
-function readReadme(repoPath) {
-  const readmePaths = ['README.md', 'README.MD', 'readme.md'];
-  for (const name of readmePaths) {
-    const full = path.join(repoPath, name);
-    if (fs.existsSync(full)) {
-      return fs.readFileSync(full, 'utf-8');
+/** Helper: fetch up to `n` open GitHub issues */
+async function fetchOpenIssues(repoId, n = 5) {
+  try {
+    const res = await axios.get(`https://api.github.com/repos/${repoId}/issues`, {
+      params: { state: 'open', per_page: n },
+      headers: { 'User-Agent': 'reposensei' }
+    });
+    return res.data.filter(issue => !issue.pull_request).slice(0, n);
+  } catch {
+    return [];
+  }
+}
+
+/** Helper: scan all files for TODO/FIXME/BUG comments */
+function scanTodoComments(repoPath) {
+  const todos = [];
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (/\.(js|jsx|ts|tsx)$/.test(entry.name)) {
+        const lines = fs.readFileSync(full, 'utf-8').split('\n');
+        lines.forEach((line, idx) => {
+          const m = line.match(/\/\/\s*(TODO|FIXME|BUG):?(.*)/i);
+          if (m) {
+            todos.push({
+              file: path.relative(repoPath, full),
+              line: idx + 1,
+              comment: m[2].trim() || '(no description)'
+            });
+          }
+        });
+      }
     }
   }
-  return '';
+  walk(repoPath);
+  return todos;
+}
+
+/** Scan for problematic code or "code smells" */
+function scanCodeSmells(repoPath) {
+  const smells = [];
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+      } else if (/\.(js|jsx)$/.test(entry.name)) {
+        const src = fs.readFileSync(full, 'utf-8');
+        const ast = parser.parse(src, {
+          sourceType: 'unambiguous',
+          plugins: ['jsx']
+        });
+        traverse(ast, {
+          Function(pathNode) {
+            let complexity = 1;
+            pathNode.traverse({
+              IfStatement() { complexity++; },
+              ForStatement() { complexity++; },
+              WhileStatement() { complexity++; },
+              ConditionalExpression() { complexity++; },
+              LogicalExpression(p) {
+                if (['&&','||'].includes(p.node.operator)) complexity++;
+              }
+            });
+            if (complexity > 10) {
+              smells.push({
+                file: path.relative(repoPath, full),
+                line: pathNode.node.loc.start.line,
+                type: 'High complexity',
+                detail: `cyclomatic complexity = ${complexity}`
+              });
+            }
+            const length = pathNode.node.loc.end.line - pathNode.node.loc.start.line + 1;
+            if (length > 100) {
+              smells.push({
+                file: path.relative(repoPath, full),
+                line: pathNode.node.loc.start.line,
+                type: 'Long function',
+                detail: `function spans ${length} lines`
+              });
+            }
+          },
+          CallExpression(pathNode) {
+            const c = pathNode.node.callee;
+            if (c.type === 'MemberExpression' && c.property.name === 'then') {
+              const parent = pathNode.parentPath;
+              const next = parent.getSibling(parent.key + 1);
+              if (!next.node || next.node.callee?.property?.name !== 'catch') {
+                smells.push({
+                  file: path.relative(repoPath, full),
+                  line: pathNode.node.loc.start.line,
+                  type: 'Unhandled promise',
+                  detail: '`then()` without `catch()`'
+                });
+              }
+            }
+          },
+          MemberExpression(pathNode) {
+            const o = pathNode.node.object;
+            const p = pathNode.node.property;
+            if (o.name === 'console' && ['log','warn','error','debug'].includes(p.name)) {
+              smells.push({
+                file: path.relative(repoPath, full),
+                line: pathNode.node.loc.start.line,
+                type: 'Console statement',
+                detail: `console.${p.name}()`
+              });
+            }
+          },
+          DebuggerStatement(pathNode) {
+            smells.push({
+              file: path.relative(repoPath, full),
+              line: pathNode.node.loc.start.line,
+              type: 'Debugger',
+              detail: '`debugger;` left in code'
+            });
+          },
+          TryStatement(pathNode) {
+            const handler = pathNode.node.handler;
+            if (!handler) {
+              smells.push({
+                file: path.relative(repoPath, full),
+                line: pathNode.node.loc.start.line,
+                type: 'Missing catch',
+                detail: '`try` without `catch`'
+              });
+            } else {
+              const body = handler.body.body;
+              const onlyLogging = body.every(stmt =>
+                stmt.type === 'ExpressionStatement' &&
+                stmt.expression.type === 'CallExpression' &&
+                stmt.expression.callee.object?.name === 'console'
+              );
+              if (body.length === 0 || onlyLogging) {
+                smells.push({
+                  file: path.relative(repoPath, full),
+                  line: handler.loc.start.line,
+                  type: 'Swallowed error',
+                  detail: '`catch` block is empty or only logs'
+                });
+              }
+            }
+          }
+        });
+      }
+    }
+  }
+  walk(repoPath);
+  return smells;
 }
 
 async function generateOnboardingTasks({ repoId, repoPath }) {
   const tasks = [];
 
-  // 1) Set up environment
-  const setupCmd = `cd ${repoPath} && npm install && npm run dev`;
-  tasks.push({
-    repoId,
-    title: 'Set up local environment',
-    description: 'Clone the repo, install dependencies, and run the dev server.',
-    command: setupCmd,
-    fileLink: null,
-    isCompleted: false
-  });
+  // 1) Architecture Overview
+  const readmePath = ['README.md','README.MD','readme.md']
+    .map(n => path.join(repoPath, n))
+    .find(fs.existsSync);
+  const readmeExcerpt = readmePath
+    ? fs.readFileSync(readmePath, 'utf-8').slice(0, 3000)
+    : '';
 
-  // 2) Architecture overview via Python Ollama backend
-const readmeContent = readReadme(repoPath).substring(0, 3000);
-
-const archPrompt = `
-You are an expert senior developer onboarding a new team member. 
+  const archPrompt = `
+You are a senior developer onboarding a new team member. 
 Given the following README excerpt, provide a concise 10-sentence summary of the repository’s architecture, including frontend/backend, key modules, and important areas a newcomer should focus on. 
 Also, list 3 suggested first tasks for onboarding based on this architecture. 
 
@@ -51,137 +188,162 @@ Return only valid JSON in this exact format, with no extra text or duplicated ke
 
 README excerpt:
 """
-${readmeContent}
+${readmeExcerpt}
 """
 `;
 
+  try {
+    const resp = await axios.post(
+      `${process.env.PYTHON_BACKEND_URL}/generate-architecture`,
+      { prompt: archPrompt }
+    );
 
+    let raw = resp.data;
+    // If wrapped in { success, response }, unwrap it:
+    if (raw.success && typeof raw.response === 'string') {
+      raw = raw.response;
+    }
+    // raw might be a JS object or a string
+    let text = typeof raw === 'string' ? raw : JSON.stringify(raw);
 
-let archOverview = '';
-try {
-  const response = await axios.post(`${process.env.PYTHON_BACKEND_URL}/generate-architecture`, {
-    prompt: archPrompt
-  });
-  const data = response.data;
- 
-
-  if (data.success) {
-    let cleaned = data.response.trim();
-
-    // 🧹 Remove Markdown code block if present
-    if (cleaned.startsWith('```json')) {
-      cleaned = cleaned.replace(/^```json/, '').replace(/```$/, '').trim();
+    // --- CLEANUP: strip triple-backtick fences and any leading text ---
+    // Remove ```json or ``` at start, and trailing ``` if present
+    text = text
+      .replace(/```json/g, '')
+      .replace(/```/g, '')
+      .trim();
+    // Now isolate the first { ... } block
+    const firstBrace = text.indexOf('{');
+    const lastBrace  = text.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      text = text.slice(firstBrace, lastBrace + 1);
     }
 
-    const parsed = JSON.parse(cleaned);
-    archOverview = parsed.overview;
+    // Parse JSON
+    const result = JSON.parse(text);
 
-    // ✅ Add main architecture overview task
+    // Push overview
     tasks.push({
       repoId,
-      title: 'Review architecture overview',
-      description: archOverview,
-      command: '# Read the architecture overview above carefully',
-      fileLink: null,
+      title: 'Architecture Overview',
+      description: result.overview,
+      command: '# Review the above architecture summary',
+      fileLink: readmePath ? path.relative(repoPath, readmePath) : null,
       isCompleted: false
     });
 
-    // ✅ Add suggested tasks from the response
-    if (Array.isArray(parsed.suggestedTasks)) {
-      parsed.suggestedTasks.forEach((taskText, index) => {
+    // Push suggestedTasks
+    if (Array.isArray(result.suggestedTasks)) {
+      result.suggestedTasks.forEach((txt, i) => {
         tasks.push({
           repoId,
-          title: `Suggested Task ${index + 1}`,
-          description: taskText,
-          command: `# ${taskText}`,
+          title: `Arch Task ${i + 1}`,
+          description: txt,
+          command: `# ${txt}`,
           fileLink: null,
           isCompleted: false
         });
       });
-    }
-
-  } else {
-    archOverview = `Error generating overview: ${data.error}`;
-
-    tasks.push({
-      repoId,
-      title: 'Error generating architecture overview',
-      description: archOverview,
-      command: '# Check backend logs or prompt format',
-      fileLink: null,
-      isCompleted: false
-    });
-  }
-} catch (err) {
-  archOverview = `Failed to call Python backend: ${err.message}`;
-
-  tasks.push({
-    repoId,
-    title: 'Backend call failed',
-    description: archOverview,
-    command: '# Check network or backend server',
-    fileLink: null,
-    isCompleted: false
-  });
-}
-
-
-  // 3) Starter issue from GitHub issues (if public)
-  let issueTask = null;
-  try {
-    const repoFull = repoId; // e.g. 'org/repo'
-    const githubRes = await axios.get(`https://api.github.com/repos/${repoFull}/issues?state=open&per_page=1`);
-    if (githubRes.data.length > 0) {
-      const issue = githubRes.data[0];
-      issueTask = {
-        repoId,
-        title: `Fix Issue #${issue.number}: ${issue.title}`,
-        description: `Guided fix: see issue description at ${issue.html_url}`,
-        command: `# Check out the issue at ${issue.html_url}`,
-        fileLink: issue.html_url,
-        isCompleted: false
-      };
-      tasks.push(issueTask);
+    } else {
+      console.warn('Architecture response missing suggestedTasks:', result);
     }
   } catch (e) {
-    // ignore if private or no issues
-  }
-
-  // 4) Run tests (if package.json has test script)
-  const pkgJsonPath = path.join(repoPath, 'package.json');
-  let hasTestScript = false;
-  if (fs.existsSync(pkgJsonPath)) {
-    const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
-    if (pkg.scripts && pkg.scripts.test) hasTestScript = true;
-  }
-  tasks.push({
-    repoId,
-    title: 'Run test suite',
-    description: hasTestScript
-      ? 'Execute `npm test` to verify existing tests pass and review coverage.'
-      : 'No test script found; create a test for a core function.',
-    command: hasTestScript ? `cd ${repoPath} && npm test` : `# Add tests for core functions`,
-    fileLink: null,
-    isCompleted: false
-  });
-
-  // 5–7) Top 3 complex nodes
-  const topNodes = await NodeModel.find({ repoId }).sort({ complexity: -1 }).limit(3);
-  topNodes.forEach((n) => {
     tasks.push({
       repoId,
-      title: `Explore complex function: ${n.name}`,
-      description: `Inspect the code in ${n.filePath} lines ${n.startLine}-${n.endLine} and understand its logic.`,
-      command: `# Open ${n.filePath} in your editor`,
-      fileLink: `file://${path.resolve(repoPath, n.filePath)}#L${n.startLine}-L${n.endLine}`,
+      title: 'Architecture Overview',
+      description: `Failed: ${e.message}`,
+      command: '# Manually review README/code',
+      fileLink: readmePath ? path.relative(repoPath, readmePath) : null,
       isCompleted: false
     });
-  });
+  }
 
-  // Clear existing tasks and insert new ones
+
+  // 2) GitHub Issues
+  const issues = await fetchOpenIssues(repoId, 5);
+  if (issues.length) {
+    issues.forEach(issue => {
+      tasks.push({
+        repoId,
+        title: `Fix Issue #${issue.number}: ${issue.title}`,
+        description: issue.body || '(no description)',
+        command: `# git fetch && git checkout -b fix/issue-${issue.number}`,
+        fileLink: issue.html_url,
+        isCompleted: false
+      });
+    });
+  } else {
+    // 3) Code Smells
+    const smells = scanCodeSmells(repoPath);
+    if (smells.length) {
+      smells.slice(0, 5).forEach((s, i) => {
+        tasks.push({
+          repoId,
+          title: `Fix ${s.type} in ${s.file}`,
+          description: `${s.detail} at ${s.file}:${s.line}`,
+          command: `# Open ${s.file}#L${s.line} and resolve`,
+          fileLink: `file://${path.resolve(repoPath, s.file)}#L${s.line}`,
+          isCompleted: false
+        });
+      });
+    } else {
+      // 4) TODO/FIXME Comments
+      const todos = scanTodoComments(repoPath);
+      if (todos.length) {
+        todos.slice(0, 5).forEach((t, i) => {
+          tasks.push({
+            repoId,
+            title: `Address ${t.comment}`,
+            description: `Found in ${t.file} at line ${t.line}`,
+            command: `# Open ${t.file}#L${t.line} and resolve`,
+            fileLink: `file://${path.resolve(repoPath, t.file)}#L${t.line}`,
+            isCompleted: false
+          });
+        });
+      } else {
+        // 5) AI-Brainstormed Tasks
+        const prompt = `
+You are a senior engineer brainstorming 5 high-value onboarding tasks for a new team member working on this codebase. Tasks should be:
+• Project-specific (features to build, refactors to do, or tests to write).
+• Non-trivial (not "run npm install", not "read" any file).
+• Each task in one sentence.
+
+Respond with a JSON array of 5 strings only.
+`;
+        try {
+          const { data } = await axios.post(
+            `${process.env.PYTHON_BACKEND_URL}/generate-tasks`,
+            { prompt }
+          );
+          const list = Array.isArray(data.tasks)
+            ? data.tasks
+            : JSON.parse(data.tasks);
+          list.slice(0, 5).forEach((text, idx) => {
+            tasks.push({
+              repoId,
+              title: `Suggestion ${idx + 1}`,
+              description: text,
+              command: `# ${text}`,
+              fileLink: null,
+              isCompleted: false
+            });
+          });
+        } catch {
+          tasks.push({
+            repoId,
+            title: 'Explore Codebase',
+            description: 'No issues, smells, or TODOs found; propose 2 tasks.',
+            command: '# Review source and README',
+            fileLink: null,
+            isCompleted: false
+          });
+        }
+      }
+    }
+  }
+
   await TaskModel.deleteMany({ repoId });
-  const created = await TaskModel.insertMany(tasks);
-  return created;
+  return await TaskModel.insertMany(tasks);
 }
 
 module.exports = { generateOnboardingTasks };

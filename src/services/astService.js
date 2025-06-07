@@ -3,6 +3,9 @@ const path = require('path');
 const parser = require('@babel/parser');
 const traverse = require('@babel/traverse').default;
 
+/**
+ * Recursively collect all .js/.jsx/.ts/.tsx files under dir
+ */
 function collectSourceFiles(dir) {
   let files = [];
   const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -17,247 +20,164 @@ function collectSourceFiles(dir) {
   return files;
 }
 
+/**
+ * Parse a single file and extract ALL function/class declarations (no import/export logic).
+ * Complexity is computed by counting:
+ *  - if/else (IfStatement)
+ *  - loops: for, while, do…while, for…in, for…of
+ *  - switch‐case (each 'case' with a test)
+ *  - ternary expressions (ConditionalExpression)
+ *  - logical && / || (LogicalExpression)
+ *  - catch clauses (CatchClause)
+ */
 function parseFile(filePath) {
   const content = fs.readFileSync(filePath, 'utf-8');
   const ast = parser.parse(content, {
-    sourceType: 'unambiguous',
-    plugins: ['typescript', 'jsx']
+    sourceType: 'unambiguous', // supports both ES modules and CommonJS
+    plugins: ['typescript', 'jsx'],
   });
 
   const nodes = [];
-  const exportedNames = new Set();
-  const declaredFunctions = new Map(); // name -> pathNode
-  const importsMap = new Map(); // local name -> source path
-  const usedImports = new Set();
 
-  // === First pass: Imports + Declarations ===
   traverse(ast, {
-    ImportDeclaration(pathNode) {
-      const source = pathNode.node.source.value;
-      pathNode.node.specifiers.forEach(spec => {
-        if (spec.local?.name) importsMap.set(spec.local.name, source);
-      });
-    },
-
-    VariableDeclarator(pathNode) {
-      const { id, init } = pathNode.node;
-
-      // CommonJS require() import
-      if (
-        init?.type === 'CallExpression' &&
-        init.callee.name === 'require' &&
-        init.arguments.length === 1 &&
-        init.arguments[0].type === 'StringLiteral'
-      ) {
-        const source = init.arguments[0].value;
-        if (id.type === 'Identifier') {
-          importsMap.set(id.name, source);
-        } else if (id.type === 'ObjectPattern') {
-          for (const prop of id.properties) {
-            if (prop.key.type === 'Identifier') {
-              importsMap.set(prop.key.name, source);
-            }
-          }
-        }
-      }
-
-      // Capture arrow or function expressions
-      if (
-        (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') &&
-        id?.type === 'Identifier'
-      ) {
-        declaredFunctions.set(id.name, pathNode);
-      }
-    },
-
+    // 1) Named function declarations (function foo() { ... })
     FunctionDeclaration(pathNode) {
       const name = pathNode.node.id?.name;
-      if (name) declaredFunctions.set(name, pathNode);
-    },
+      if (!name) return;
 
-    ClassDeclaration(pathNode) {
-      const name = pathNode.node.id?.name;
-      if (name) declaredFunctions.set(name, pathNode);
-    }
-  });
+      const startLine = pathNode.node.loc.start.line;
+      const endLine = pathNode.node.loc.end.line;
 
-  // === Second pass: Handle Exports ===
-  traverse(ast, {
-    ExportNamedDeclaration(pathNode) {
-      const decl = pathNode.node.declaration;
-      if (decl?.type === 'FunctionDeclaration' && decl.id?.name) {
-        exportedNames.add(decl.id.name);
-      } else if (decl?.type === 'VariableDeclaration') {
-        for (const d of decl.declarations) {
-          if (d.id?.name) exportedNames.add(d.id.name);
-        }
-      }
-    },
-
-    ExportDefaultDeclaration(pathNode) {
-      const decl = pathNode.node.declaration;
-      const name = decl?.id?.name || 'default_export';
-      const startLine = decl.loc?.start.line ?? 0;
-      const endLine = decl.loc?.end.line ?? 0;
+      // Compute complexity:
+      let complexity = 1;
+      pathNode.traverse({
+        IfStatement() { complexity += 1; },
+        ForStatement() { complexity += 1; },
+        WhileStatement() { complexity += 1; },
+        DoWhileStatement() { complexity += 1; },
+        ForInStatement() { complexity += 1; },
+        ForOfStatement() { complexity += 1; },
+        SwitchCase(switchPath) {
+          if (switchPath.node.test) complexity += 1;
+        },
+        ConditionalExpression() { complexity += 1; },
+        LogicalExpression(logPath) {
+          const op = logPath.node.operator;
+          if (op === '&&' || op === '||') complexity += 1;
+        },
+        CatchClause() { complexity += 1; },
+      });
 
       nodes.push({
         nodeId: `${filePath}::${name}`,
         filePath,
         startLine,
         endLine,
-        type: decl.type === 'ClassDeclaration' ? 'class' : 'function',
+        type: 'function',
         name,
-        complexity: 0,
-        calledFunctions: []
+        complexity,
+        calledFunctions: [],
       });
     },
 
-    AssignmentExpression(pathNode) {
-      const { node } = pathNode;
-      const left = node.left;
-      const right = node.right;
-
+    // 2) Arrow functions or function expressions assigned to a variable
+    VariableDeclarator(pathNode) {
+      const { id, init } = pathNode.node;
       if (
-        left.type === 'MemberExpression' &&
-        left.object.name === 'module' &&
-        left.property.name === 'exports'
+        (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') &&
+        id.type === 'Identifier'
       ) {
-        if (right.type === 'FunctionExpression' || right.type === 'ArrowFunctionExpression') {
-          nodes.push({
-            nodeId: `${filePath}::default_export`,
-            filePath,
-            startLine: right.loc?.start.line ?? 0,
-            endLine: right.loc?.end.line ?? 0,
-            type: 'function',
-            name: 'default_export',
-            complexity: 0,
-            calledFunctions: []
-          });
-        } else if (right.type === 'ObjectExpression') {
-          for (const prop of right.properties) {
-            if (prop.key.type === 'Identifier') {
-              exportedNames.add(prop.key.name);
-            }
-          }
-        }
-      }
+        const name = id.name;
+        const startLine = pathNode.node.loc.start.line;
+        const endLine = pathNode.node.loc.end.line;
 
-      // exports.foo = function() {}
-      if (
-        left.type === 'MemberExpression' &&
-        left.object.name === 'exports' &&
-        left.property.type === 'Identifier'
-      ) {
-        const fnName = left.property.name;
-        exportedNames.add(fnName);
+        let complexity = 1;
+        pathNode.traverse({
+          IfStatement() { complexity += 1; },
+          ForStatement() { complexity += 1; },
+          WhileStatement() { complexity += 1; },
+          DoWhileStatement() { complexity += 1; },
+          ForInStatement() { complexity += 1; },
+          ForOfStatement() { complexity += 1; },
+          SwitchCase(switchPath) {
+            if (switchPath.node.test) complexity += 1;
+          },
+          ConditionalExpression() { complexity += 1; },
+          LogicalExpression(logPath) {
+            const op = logPath.node.operator;
+            if (op === '&&' || op === '||') complexity += 1;
+          },
+          CatchClause() { complexity += 1; },
+        });
 
-        if (right.type === 'FunctionExpression' || right.type === 'ArrowFunctionExpression') {
-          nodes.push({
-            nodeId: `${filePath}::${fnName}`,
-            filePath,
-            startLine: right.loc?.start.line ?? 0,
-            endLine: right.loc?.end.line ?? 0,
-            type: 'function',
-            name: fnName,
-            complexity: 0,
-            calledFunctions: []
-          });
-        }
-      }
-    }
-  });
-
-  // === Third pass: Declared + Exported Functions ===
-  for (const [name, pathNode] of declaredFunctions.entries()) {
-    if (!exportedNames.has(name)) continue;
-
-    const node = pathNode.node;
-    const type =
-      node.type === 'FunctionDeclaration' ? 'function' :
-      node.init?.type === 'ClassExpression' ? 'class' : 'function';
-
-    const bodyNode = node.body || node.init?.body;
-    const startLine = node.loc?.start.line ?? 0;
-    const endLine = node.loc?.end.line ?? 0;
-    let complexity = 0;
-
-    pathNode.traverse({
-      IfStatement() { complexity += 1; },
-      ForStatement() { complexity += 1; },
-      WhileStatement() { complexity += 1; },
-      SwitchStatement() { complexity += 1; },
-      TryStatement() { complexity += 1; }
-    });
-
-    nodes.push({
-      nodeId: `${filePath}::${name}`,
-      filePath,
-      startLine,
-      endLine,
-      type,
-      name,
-      complexity,
-      calledFunctions: []
-    });
-  }
-
-  // === Final pass: Track function calls and JSX usage ===
-  traverse(ast, {
-    CallExpression(pathNode) {
-      const callee = pathNode.node.callee;
-
-      if (callee.type === 'Identifier') {
-        const fnName = callee.name;
-        if (importsMap.has(fnName)) usedImports.add(fnName);
-
-        for (const n of nodes) {
-          if (n.name !== fnName) continue;
-          n.calledFunctions.push(`${filePath}::${fnName}`);
-        }
-      } else if (callee.type === 'MemberExpression') {
-        const object = callee.object;
-        const property = callee.property;
-
-        if (
-          (object.type === 'Identifier' && ['module', 'exports'].includes(object.name)) &&
-          property.type === 'Identifier'
-        ) {
-          const fnName = property.name;
-          for (const n of nodes) {
-            if (n.name !== fnName) continue;
-            n.calledFunctions.push(`${filePath}::${fnName}`);
-          }
-        }
-
-        if (object.type === 'Identifier' && importsMap.has(object.name)) {
-          usedImports.add(object.name);
-        }
+        nodes.push({
+          nodeId: `${filePath}::${name}`,
+          filePath,
+          startLine,
+          endLine,
+          type: 'function',
+          name,
+          complexity,
+          calledFunctions: [],
+        });
       }
     },
 
-    JSXOpeningElement(pathNode) {
-      const nameNode = pathNode.node.name;
-      if (nameNode.type === 'JSXIdentifier') {
-        const componentName = nameNode.name;
-        if (importsMap.has(componentName)) {
-          usedImports.add(componentName);
-        }
+    // 3) Class declarations
+    ClassDeclaration(pathNode) {
+      const name = pathNode.node.id?.name;
+      if (!name) return;
+
+      const startLine = pathNode.node.loc.start.line;
+      const endLine = pathNode.node.loc.end.line;
+
+      let complexity = 1;
+      pathNode.traverse({
+        IfStatement() { complexity += 1; },
+        ForStatement() { complexity += 1; },
+        WhileStatement() { complexity += 1; },
+        DoWhileStatement() { complexity += 1; },
+        ForInStatement() { complexity += 1; },
+        ForOfStatement() { complexity += 1; },
+        SwitchCase(switchPath) {
+          if (switchPath.node.test) complexity += 1;
+        },
+        ConditionalExpression() { complexity += 1; },
+        LogicalExpression(logPath) {
+          const op = logPath.node.operator;
+          if (op === '&&' || op === '||') complexity += 1;
+        },
+        CatchClause() { complexity += 1; },
+      });
+
+      nodes.push({
+        nodeId: `${filePath}::${name}`,
+        filePath,
+        startLine,
+        endLine,
+        type: 'class',
+        name,
+        complexity,
+        calledFunctions: [],
+      });
+    },
+
+    //4) Record function calls as dependencies,
+    
+    CallExpression(pathNode) {
+      const callee = pathNode.node.callee;
+      if (callee.type === 'Identifier') {
+        const fnName = callee.name;
+        nodes.forEach(n => {
+          if (n.name === fnName) {
+            n.calledFunctions.push(`${n.filePath}::${fnName}`);
+          }
+        });
       }
     }
   });
-
-  // === Link imported used functions ===
-  for (const used of usedImports) {
-    const source = importsMap.get(used);
-    for (const n of nodes) {
-      n.calledFunctions.push(`${source}::${used}`);
-    }
-  }
 
   return nodes;
 }
 
-module.exports = {
-  collectSourceFiles,
-  parseFile
-};
+module.exports = { collectSourceFiles, parseFile };
