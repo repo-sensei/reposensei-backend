@@ -72,19 +72,30 @@ router.post('/scan', async (req, res) => {
       // Parse functions/classes in this file
       const nodes = parseFile(file);
 
+      const relativePath = path.relative(repoPath, file);
+      const moduleName = path.dirname(relativePath).replace(/\\/g, '/') || 'root';
+
       for (const node of nodes) {
         // Save node document
         await NodeModel.create({
           repoId,
           nodeId: node.nodeId,
           filePath: node.filePath,
+          module: moduleName,
           startLine: node.startLine,
           endLine: node.endLine,
           type: node.type,
           name: node.name,
           complexity: node.complexity,
-          calledFunctions: node.calledFunctions
+          complexityBreakdown: node.complexityBreakdown,
+          calledFunctions: node.calledFunctions,
+          isExported: node.isExported,
+          parentName: node.parentName,
+          parameters: node.parameters,
+          scopeLevel: node.scopeLevel,
+          isAsync: node.isAsync,
         });
+
 
         // Extract the snippet lines corresponding to this node
         const srcContent = fs.readFileSync(file, 'utf-8');
@@ -99,7 +110,7 @@ router.post('/scan', async (req, res) => {
           'node',
           node.nodeId,
           snippet,
-          { filePath: node.filePath }
+          { filePath: node.filePath, module: moduleName  }
         );
       }
     }

@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const connectDB = require('./src/config/db');
+const path = require('path');
 
 const repoRouter = require('./src/controllers/repoController');
 const docsRouter = require('./src/controllers/docsController');
@@ -24,6 +25,8 @@ app.use('/api/tasks', tasksRouter);
 app.use('/api/changes', changeRouter);
 app.use('/api/chat', chatRouter);
 app.use('/api/webhook', webhookRouter);
+
+app.use('/generated', express.static(path.join(__dirname, 'docs/generated')));
 
 // Start server
 connectDB().then(() => {

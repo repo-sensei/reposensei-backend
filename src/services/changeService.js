@@ -29,28 +29,33 @@ async function summarizeChanges(repoId, sinceDate) {
     .join('\n');
 
   const promptAI = `
-You are a senior software engineer who writes detailed, high-level change reports for a developer audience. Below are the recent commits since ${sinceDate.toDateString()} in the "${repoId}" repository:
+You are a senior software engineer writing concise yet detailed change summaries for developers. Below are recent commits since ${sinceDate.toDateString()} in the "${repoId}" repository:
 
 ${changesText}
 
-For each bullet, describe what the contributor did, including file-level details. 
-- If a React component file was added (e.g. ends in .jsx or .tsx), mention that "a new React component named <ComponentName> was introduced to handle <feature>. Whichever file was changed, write the content accordingly."
-- If server/API files were changed, mention the new endpoint or logic as appropriate.
-- Group related changes under the same contributor or timeframe if possible.
-Write a **detailed 300-word summary**, using bullet points or short paragraphs for clarity. Focus on:
-1. New features added (what functionality was introduced and where).
-2. Major refactors (which files or modules were reorganized).
-3. Bug fixes or performance improvements (mention specific components or backend code if visible).
-4. Any new tests or documentation updates (if commit messages mention them).
+Summarize these changes with clear bullet points or short paragraphs. For each:
+- Explain what the contributor did, including key file-level actions.
+- If a React file (.jsx/.tsx) was added, say: "A new React component <ComponentName> was introduced for <feature>."
+- If API/server files changed, mention the endpoint or logic update.
+- Group similar changes by contributor or timeframe.
 
-Output the text—do not reprint the individual bullets.
+Focus on:
+1. New features (functionality and location)
+2. Refactors (which files/modules were reorganized)
+3. Bug fixes/performance improvements (mention specific components if possible)
+4. New tests or documentation (if commit messages indicate so)
+
+Limit output to **around 500 words** or fewer.
+Do **not** repeat the original bullets—just summarize.
   `;
 
   try {
+   
     const res = await axios.post(
       `${process.env.PYTHON_BACKEND_URL}/summarize`,
       { prompt: promptAI }
     );
+   
     return res.data.summary;
   } catch (error) {
     console.error('Error calling Python backend summarizer:', error);

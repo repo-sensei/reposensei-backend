@@ -31,29 +31,36 @@ async function embedText(text) {
   }
 }
 
-
-// 2) Insert embedding into Supabase
+// 2) Upsert embedding into Supabase with flattened metadata
 async function upsertCodeEmbedding(repoId, type, refId, textToEmbed, metadata) {
   try {
     const embedding = await embedText(textToEmbed);
+
+    // Flatten metadata for native columns
+    const row = {
+      repo_id: repoId,
+      type,
+      ref_id: refId,
+      embedding,
+      metadata,
+      module: metadata.module?.replace(/\\/g, '/'),
+      file_path: metadata.filePath?.replace(/\\/g, '/'),
+      
+      // add additional flattened metadata here if needed, e.g. complexity, author, date
+    };
+
+    // Use upsert to avoid duplicates and handle re-scans
     const { data, error } = await supabase
       .from('code_embeddings')
-      .insert([
-        {
-          repo_id: repoId,
-          type,
-          ref_id: refId,
-          embedding,
-          metadata
-        }
-      ]);
+      .upsert([row], { onConflict: ['repo_id', 'type', 'ref_id'] });
+
     if (error) {
-      console.error('Supabase insert error:', error);
+      console.error('Supabase upsert error:', error);
       return null;
     }
     return data;
   } catch (err) {
-    console.error('Embedding or insertion failed:', err.message);
+    console.error('Embedding or upsert failed:', err.message);
     return null;
   }
 }
