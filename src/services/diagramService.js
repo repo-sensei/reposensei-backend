@@ -1,18 +1,15 @@
-// src/services/diagramService.js
-
 const NodeModel = require('../models/Node');
 const fs = require('fs');
 const path = require('path');
 const { exec } = require('child_process');
 
 /**
- * 1) Build a DOT graph (.dot) clustering by directory and styling by complexity.
- * 2) Render it to SVG via the `dot` CLI.
+ * Build a DOT graph clustered by module, styled by complexity, and rendered to SVG.
  */
 async function generateDotGraph(repoId) {
   const nodes = await NodeModel.find({ repoId });
 
-  // Take top 30 by complexity
+  // Take top 30 nodes by complexity
   const topNodes = nodes
     .sort((a, b) => b.complexity - a.complexity)
     .slice(0, 30);
@@ -24,51 +21,75 @@ async function generateDotGraph(repoId) {
     idMap[n.nodeId] = `N${i}_${label}`;
   });
 
-  // Start building DOT
+  // Start building DOT graph
   let dot = `
 digraph G {
-  rankdir=LR;            // left-to-right
-  splines=ortho;         // orthogonal edges
-  nodesep=0.6;           // horizontal separation
-  ranksep=0.8;           // vertical separation
-  node [shape=box, style="rounded,filled", fontname="Helvetica"];
-  edge [arrowsize=0.6];
+  rankdir=LR;              // left-to-right layout
+  splines=ortho;           // orthogonal edges for clarity
+  nodesep=0.8;             // more space between nodes horizontally
+  ranksep=1.0;             // more space between ranks vertically
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=10];
+  edge [arrowsize=0.7, penwidth=1.2];
+  
+  // Legend node for edge colors
+  subgraph cluster_legend {
+    label="Legend";
+    style=filled;
+    color=white;
+    node [shape=note, fontsize=9, style=filled, fillcolor=white];
+    legend_green [label="Green: Intra-Module Calls"];
+    legend_red [label="Red: Cross-Module Calls"];
+  }
 `;
 
-  // Cluster by directory
+  // Group nodes by module or directory fallback
   const groups = {};
   topNodes.forEach(n => {
-    const dir = path.dirname(n.filePath) || '.';
-    groups[dir] = groups[dir] || [];
-    groups[dir].push(n);
+    const groupKey = n.module || path.dirname(n.filePath) || '.';
+    groups[groupKey] = groups[groupKey] || [];
+    groups[groupKey].push(n);
   });
 
-  Object.entries(groups).forEach(([dir, ns], gi) => {
+  // Add clustered nodes by module
+  Object.entries(groups).forEach(([mod, ns], gi) => {
     dot += `  subgraph cluster_${gi} {\n`;
-    dot += `    label = "${dir}";\n`;
-    dot += `    style=filled; color=lightgrey; node [style=filled,color=white];\n`;
+    dot += `    label = "${mod}";\n`;
+    dot += `    style=filled; color="#f0f0f0"; node [style=filled,color=white];\n`;
+
     ns.forEach(n => {
       const nid = idMap[n.nodeId];
-      // Color based on complexity
-      let fill = 'white';
+      if (!nid) return;
+
+      // Color nodes by complexity
+      let fill = 'lightgreen';
       if (n.complexity >= 15) fill = 'lightcoral';
       else if (n.complexity >= 8) fill = 'gold';
-      else fill = 'lightgreen';
 
       const safeLabel = n.name.replace(/"/g, '\\"');
       dot += `    ${nid} [label="${safeLabel}\\n(C=${n.complexity})", fillcolor="${fill}"];\n`;
     });
+
     dot += `  }\n\n`;
   });
 
-  // Edges among top nodes
+  // Add edges with color coding for module calls
   topNodes.forEach(n => {
     const from = idMap[n.nodeId];
+    if (!from || !n.calledFunctions) return;
+
+    const fromModule = n.module || path.dirname(n.filePath) || '.';
+
     n.calledFunctions.forEach(cf => {
       const to = idMap[cf];
-      if (to) {
-        dot += `  ${from} -> ${to};\n`;
-      }
+      if (!to) return;
+
+      const callee = topNodes.find(x => x.nodeId === cf);
+      const toModule = callee?.module || path.dirname(callee?.filePath || '') || '.';
+
+      // Color edges red if cross-module, green if same-module
+      const edgeColor = (fromModule !== toModule) ? 'red' : 'green';
+
+      dot += `  ${from} -> ${to} [color="${edgeColor}"];\n`;
     });
   });
 

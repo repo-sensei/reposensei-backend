@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { generateDotGraph, renderDotToSvg } = require('../services/diagramService');
-const { computeHotspots } = require('../services/debtService');
+const { computeHotspots, fetchRefactorSuggestions } = require('../services/debtService');
 
 const router = express.Router();
 
@@ -36,9 +36,22 @@ router.get('/hotspots/:repoId', async (req, res) => {
     const { repoId } = req.params;
     const repoPath = path.join(os.tmpdir(), 'reposensei', repoId);
     const hotspots = await computeHotspots(repoId, repoPath);
+
     return res.status(200).json({ success: true, hotspots });
   } catch (err) {
     console.error('Error in /api/docs/hotspots:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+router.get('/hotspots/:repoId/:nodeId/suggestions', async (req, res) => {
+  try {
+    const { repoId, nodeId } = req.params;
+    const repoPath = path.join(os.tmpdir(), 'reposensei', repoId);
+    const suggestions = await fetchRefactorSuggestions(nodeId, repoPath);
+    return res.status(200).json({ success: true, suggestions });
+  } catch (err) {
+    console.error(`Error fetching suggestions for node ${req.params.nodeId}:`, err);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
