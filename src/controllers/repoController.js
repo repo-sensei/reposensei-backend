@@ -10,7 +10,6 @@ const { upsertCodeEmbedding } = require('../services/vectorService');
 
 const router = express.Router();
 
-// POST /api/repo/scan
 router.post('/scan', async (req, res) => {
   try {
     const { repoUrl, repoId, userId } = req.body;
@@ -24,14 +23,11 @@ router.post('/scan', async (req, res) => {
     const repoPath = await ensureRepoCloned(repoUrl, repoId);
 
     // 2) Fetch commits (up to 50) including filesChanged
-    //    Each returned object should be: { sha, author, date, message, filesChanged: [ ... ] }
     const commits = await getRecentCommitsWithFiles(repoPath);
-
     console.log(`Fetched ${commits.length} commits`);
 
     // 3) Insert each commit into Mongo + embed commit message & filesChanged
     for (const c of commits) {
-      // Upsert to avoid duplicates on sha
       await CommitModel.updateOne(
         { sha: c.sha },
         {
@@ -47,7 +43,6 @@ router.post('/scan', async (req, res) => {
         { upsert: true }
       );
 
-      // Embed commit message (and optionally metadata) into Supabase
       await upsertCodeEmbedding(
         repoId,
         'commit',
@@ -66,22 +61,22 @@ router.post('/scan', async (req, res) => {
     console.log(`Collected ${files.length} source files`);
 
     for (const file of files) {
-      // Remove existing nodes for this file so we can re‐insert fresh
       await NodeModel.deleteMany({ filePath: file });
 
-      // Parse functions/classes in this file
-      const nodes = parseFile(file);
+      const nodes = parseFile(file, repoId, (() => {
+        const relativePath = path.relative(repoPath, file);
+        return path.dirname(relativePath).replace(/\\/g, '/') || 'root';
+      })());
 
-      const relativePath = path.relative(repoPath, file);
-      const moduleName = path.dirname(relativePath).replace(/\\/g, '/') || 'root';
+      const srcContent = fs.readFileSync(file, 'utf-8');
 
       for (const node of nodes) {
-        // Save node document
+        // Save node document with new fields
         await NodeModel.create({
           repoId,
           nodeId: node.nodeId,
           filePath: node.filePath,
-          module: moduleName,
+          module: node.module,
           startLine: node.startLine,
           endLine: node.endLine,
           type: node.type,
@@ -89,34 +84,38 @@ router.post('/scan', async (req, res) => {
           complexity: node.complexity,
           complexityBreakdown: node.complexityBreakdown,
           calledFunctions: node.calledFunctions,
+          calledBy: node.calledBy || [],          // Add calledBy here
           isExported: node.isExported,
           parentName: node.parentName,
           parameters: node.parameters,
           scopeLevel: node.scopeLevel,
           isAsync: node.isAsync,
+          returnsValue: node.returnsValue || false,
+          jsDocComment: node.jsDocComment || '',
+          fileType: node.fileType || 'unknown',
+          httpEndpoint: node.httpEndpoint || null,
+          invokesAPI: node.invokesAPI || false,
+          invokesDBQuery: node.invokesDBQuery || false,
+          relatedComponents: node.relatedComponents || []
         });
 
-
-        // Extract the snippet lines corresponding to this node
-        const srcContent = fs.readFileSync(file, 'utf-8');
+        // Extract snippet lines for embedding
         const snippet = srcContent
           .split('\n')
           .slice(node.startLine - 1, node.endLine)
           .join('\n');
 
-        // Embed the snippet into Supabase for vector search
         await upsertCodeEmbedding(
           repoId,
           'node',
           node.nodeId,
           snippet,
-          { filePath: node.filePath, module: moduleName  }
+          { filePath: node.filePath, module: node.module }
         );
       }
     }
 
     // 5) Save/update the Repo document with lastScanned timestamp
-    //    If a Repo doc already exists with this repoId, overwrite lastScanned
     await Repo.updateOne(
       { repoId },
       {
@@ -130,16 +129,13 @@ router.post('/scan', async (req, res) => {
     );
 
     console.log('Repository metadata saved');
-    return res
-      .status(200)
-      .json({ success: true, message: 'Repo scanned successfully.' });
+    return res.status(200).json({ success: true, message: 'Repo scanned successfully.' });
   } catch (err) {
     console.error('Error in /api/repo/scan:', err);
-    return res
-      .status(500)
-      .json({ success: false, message: 'Scan failed.', error: err.message });
+    return res.status(500).json({ success: false, message: 'Scan failed.', error: err.message });
   }
 });
+
 
 // GET /api/repo/list?userId=<userId>
 router.get('/list', async (req, res) => {

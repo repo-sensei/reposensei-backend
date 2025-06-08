@@ -3,312 +3,338 @@ const path = require('path');
 const parser = require('@babel/parser');
 const traverse = require('@babel/traverse').default;
 
-// Recursively collect all .js/.jsx/.ts/.tsx files under dir
+const IGNORE_IMPORTS = new Set([
+  'useState', 'useEffect', 'useRef', 'useMemo', 'useCallback',
+  'Fragment', 'React', 'createContext', 'useContext', 'useReducer',
+  'Router', 'Route', 'Switch', 'Link', 'Navigate'
+]);
+
+const IGNORE_MODULES = new Set(['react', 'react-dom']);
+const NEXT_DATA_FUNCS = new Set([
+  'getStaticProps', 'getServerSideProps', 'getStaticPaths', 'getInitialProps'
+]);
+
+function computeComplexityBreakdown(pathNode) {
+  const breakdown = {
+    ifStatements: 0, loops: 0, switchCases: 0,
+    ternaries: 0, logicalExpressions: 0, catchClauses: 0
+  };
+  pathNode.traverse({
+    IfStatement() { breakdown.ifStatements++; },
+    ForStatement() { breakdown.loops++; },
+    WhileStatement() { breakdown.loops++; },
+    DoWhileStatement() { breakdown.loops++; },
+    ForInStatement() { breakdown.loops++; },
+    ForOfStatement() { breakdown.loops++; },
+    SwitchCase() { breakdown.switchCases++; },
+    ConditionalExpression() { breakdown.ternaries++; },
+    LogicalExpression() { breakdown.logicalExpressions++; },
+    CatchClause() { breakdown.catchClauses++; }
+  });
+  breakdown.totalComplexity = Object.values(breakdown).reduce((a, b) => a + b, 0);
+  return breakdown;
+}
+
+function getParameters(node) {
+  return (node.params || []).map(param => param.name || '');
+}
+
+function resolveImportToPath(baseFile, importPath) {
+  if (!importPath.startsWith('.')) return null;
+  const baseDir = path.dirname(baseFile);
+  const absPath = path.resolve(baseDir, importPath);
+  const exts = ['.js', '.jsx', '.ts', '.tsx', '/index.js', '/index.tsx'];
+  for (const ext of exts) {
+    const full = absPath + ext;
+    if (fs.existsSync(full)) return full;
+  }
+  return null;
+}
+
 function collectSourceFiles(dir) {
   let files = [];
-  const entries = fs.readdirSync(dir, { withFileTypes: true });
-  for (const entry of entries) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      files = files.concat(collectSourceFiles(fullPath));
-    } else if (/\.(js|jsx|ts|tsx)$/.test(entry.name)) {
-      files.push(fullPath);
-    }
+    if (entry.isDirectory()) files = files.concat(collectSourceFiles(fullPath));
+    else if (/\.(js|jsx|ts|tsx)$/.test(entry.name)) files.push(fullPath);
   }
   return files;
 }
 
 function parseFile(filePath, repoId, moduleName) {
   const content = fs.readFileSync(filePath, 'utf-8');
-  const ast = parser.parse(content, {
-    sourceType: 'unambiguous', // allows both ES modules and CommonJS
-    plugins: ['typescript', 'jsx']
-  });
+  const ast = parser.parse(content, { sourceType: 'unambiguous', plugins: ['typescript', 'jsx'] });
 
-  const nodes = [];
+  const fileFunctions = [];
   const exportedNames = new Set();
   const importsMap = new Map();
-  const usedImports = new Set();
 
-  // Helper: compute complexity breakdown
-  function computeComplexityBreakdown(pathNode) {
-    const breakdown = {
-      ifStatements: 0,
-      loops: 0,
-      switchCases: 0,
-      ternaries: 0,
-      logicalExpressions: 0,
-      catchClauses: 0,
-    };
-    pathNode.traverse({
-      IfStatement() { breakdown.ifStatements++; },
-      ForStatement() { breakdown.loops++; },
-      WhileStatement() { breakdown.loops++; },
-      DoWhileStatement() { breakdown.loops++; },
-      ForInStatement() { breakdown.loops++; },
-      ForOfStatement() { breakdown.loops++; },
-      SwitchCase() { breakdown.switchCases++; },
-      ConditionalExpression() { breakdown.ternaries++; },
-      LogicalExpression() { breakdown.logicalExpressions++; },
-      CatchClause() { breakdown.catchClauses++; },
-    });
-    const totalComplexity = Object.values(breakdown).reduce((a, b) => a + b, 0);
-    return { breakdown, totalComplexity };
-  }
-
-  // Helper: get function parameters as array of string names
-  function getParameters(node) {
-    if (!node.params) return [];
-    return node.params.map(param => {
-      if (param.type === 'Identifier') return param.name;
-      // For complex param types, fallback to empty string
-      return '';
-    });
-  }
-
-  // First pass: collect exported names and imports
+  // First pass to collect imports and exported names (named & default identifiers)
   traverse(ast, {
-    ImportDeclaration(pathNode) {
-      const source = pathNode.node.source.value; // e.g. './Footer'
-      for (const specifier of pathNode.node.specifiers) {
-        if (
-          specifier.type === 'ImportDefaultSpecifier' ||
-          specifier.type === 'ImportSpecifier' ||
-          specifier.type === 'ImportNamespaceSpecifier'
-        ) {
-          const localName = specifier.local.name;
-          importsMap.set(localName, source);
-        }
-      }
+    ImportDeclaration(path) {
+      const src = path.node.source.value;
+      if (IGNORE_MODULES.has(src)) return;
+      path.node.specifiers.forEach(spec => spec.local?.name && importsMap.set(spec.local.name, src));
     },
-
-    ExportNamedDeclaration(pathNode) {
-      const decl = pathNode.node.declaration;
-      if (decl?.type === 'FunctionDeclaration' && decl.id?.name) {
-        exportedNames.add(decl.id.name);
-      } else if (decl?.type === 'VariableDeclaration') {
-        for (const d of decl.declarations) {
-          if (d.id?.name) exportedNames.add(d.id.name);
-        }
-      }
+    ExportNamedDeclaration(path) {
+      const d = path.node.declaration;
+      if (d?.id?.name) exportedNames.add(d.id.name);
+      else if (d?.declarations) d.declarations.forEach(dr => dr.id?.name && exportedNames.add(dr.id.name));
     },
-
-    ExportDefaultDeclaration(pathNode) {
-      const decl = pathNode.node.declaration;
-      if (decl.type === 'Identifier') {
-        exportedNames.add(decl.name);
-      } else {
-        // Handled below in second pass
-      }
+    ExportDefaultDeclaration(path) {
+      const d = path.node.declaration;
+      if (d.type === 'Identifier') exportedNames.add(d.name);
     }
   });
 
-  // Handle late export default identifier
-  for (const stmt of ast.program.body) {
-    if (
-      stmt.type === 'ExportDefaultDeclaration' &&
-      stmt.declaration.type === 'Identifier'
-    ) {
-      exportedNames.add(stmt.declaration.name);
+  let currentNode = null;
+  function pushNode(meta) {
+    fileFunctions.push({
+      repoId,
+      nodeId: `${filePath}::${meta.name}`,
+      filePath,
+      module: moduleName,
+      startLine: meta.loc.start.line,
+      endLine: meta.loc.end.line,
+      type: meta.type,
+      name: meta.name,
+      complexity: 0,
+      complexityBreakdown: {},
+      calledFunctions: [],
+      calledBy: [],
+      isExported: !!meta.isExported,
+      parameters: meta.params || [],
+      scopeLevel: meta.scopeLevel || 'top-level',
+      isAsync: !!meta.isAsync,
+      returnsValue: false,
+      jsDocComment: '',
+      fileType: inferFileType(filePath),
+      httpEndpoint: '',
+      invokesAPI: false,
+      invokesDBQuery: false,
+      relatedComponents: []
+    });
+    currentNode = fileFunctions[fileFunctions.length - 1];
+  }
+  function endNode() { currentNode = null; }
+
+  function inferFileType(filePath) {
+    const normalizedPath = filePath.replace(/\\/g, '/'); // Handle Windows paths
+
+    if (/\/(pages|routes|components|frontend)\//.test(normalizedPath)) return 'frontend';
+    if (/\/(api|server|backend|controllers|routes)\//.test(normalizedPath)) return 'backend';
+    if (/\/(utils|helpers|lib|common)\//.test(normalizedPath)) return 'util';
+    if (/\/(test|__tests__)\//.test(normalizedPath) || /\.test\.(js|ts|jsx|tsx)$/.test(normalizedPath)) return 'test';
+    
+    return 'shared';
+  }
+
+
+  // Your onCall and onJSX functions from before
+  function onCall(path) {
+    const callee = path.node.callee;
+    if (callee.type === 'Identifier' && currentNode) {
+      const fn = callee.name;
+      if (!IGNORE_IMPORTS.has(fn) && (!importsMap.has(fn) || !IGNORE_MODULES.has(importsMap.get(fn)))) {
+        let target = fn;
+        if (importsMap.has(fn)) {
+          const src = importsMap.get(fn);
+          const rp = resolveImportToPath(filePath, src);
+          if (rp) target = `${rp}::${fn}`;
+          if (/axios|fetch/.test(fn)) currentNode.invokesAPI = true;
+          if (/prisma|mongoose|db/.test(src)) currentNode.invokesDBQuery = true;
+        }
+        currentNode.calledFunctions.push(target);
+      }
     }
   }
 
-  // Handle CommonJS exports and requires
-  traverse(ast, {
-    AssignmentExpression(pathNode) {
-      const left = pathNode.node.left;
-      if (
-        left.type === 'MemberExpression' &&
-        left.object.type === 'Identifier' &&
-        (left.object.name === 'module' || left.object.name === 'exports')
-      ) {
-        if (
-          left.object.name === 'module' &&
-          left.property.type === 'Identifier' &&
-          left.property.name === 'exports'
-        ) {
-          const right = pathNode.node.right;
-          if (right.type === 'Identifier') {
-            exportedNames.add(right.name);
-          } else if (right.type === 'ObjectExpression') {
-            for (const prop of right.properties) {
-              if (prop.key && prop.key.type === 'Identifier') {
-                exportedNames.add(prop.key.name);
-              }
-            }
-          }
-        } else if (left.object.name === 'exports' && left.property.type === 'Identifier') {
-          exportedNames.add(left.property.name);
-        }
-      }
-    },
-
-    VariableDeclarator(pathNode) {
-      const { id, init } = pathNode.node;
-      if (
-        init?.type === 'CallExpression' &&
-        init.callee.type === 'Identifier' &&
-        init.callee.name === 'require' &&
-        init.arguments.length === 1 &&
-        init.arguments[0].type === 'StringLiteral' &&
-        id.type === 'Identifier'
-      ) {
-        const localName = id.name;
-        const source = init.arguments[0].value;
-        importsMap.set(localName, source);
-      }
+  function onJSX(path) {
+    const nm = path.node.name.name;
+    const src = importsMap.get(nm);
+    if (!IGNORE_IMPORTS.has(nm) && src && !IGNORE_MODULES.has(src) && currentNode) {
+      const rp = resolveImportToPath(filePath, src);
+      if (rp) currentNode.relatedComponents.push(`${rp}::${nm}`);
     }
-  });
+  }
 
-  // Second pass: collect nodes for functions, classes, and methods
+  // Main AST traversal for function, variable, class, class methods
   traverse(ast, {
-    FunctionDeclaration(pathNode) {
-      const node = pathNode.node;
-      const name = node.id?.name;
-      if (!name || !exportedNames.has(name)) return;
-      const { breakdown, totalComplexity } = computeComplexityBreakdown(pathNode);
-      const params = getParameters(node);
-      nodes.push({
-        repoId,
-        nodeId: `${filePath}::${name}`,
-        filePath,
-        module: moduleName,
-        startLine: node.loc.start.line,
-        endLine: node.loc.end.line,
-        type: 'function',
+    FunctionDeclaration(path) {
+      const name = path.node.id?.name;
+      if (!name || (!exportedNames.has(name) && !NEXT_DATA_FUNCS.has(name))) return;
+      const type = NEXT_DATA_FUNCS.has(name) ? 'next-data' : 'function';
+      pushNode({
         name,
-        complexity: totalComplexity,
-        complexityBreakdown: breakdown,
-        calledFunctions: [],
-        calledBy: [],
-        isExported: true,
-        parentName: null,
-        parameters: params,
+        type,
+        loc: path.node.loc,
+        isExported: exportedNames.has(name),
+        params: getParameters(path.node),
         scopeLevel: 'top-level',
-        isAsync: !!node.async,
+        isAsync: path.node.async
       });
+      currentNode.complexityBreakdown = computeComplexityBreakdown(path);
+      currentNode.complexity = currentNode.complexityBreakdown.totalComplexity;
+      path.traverse({ CallExpression: onCall, JSXOpeningElement: onJSX });
+      currentNode.returnsValue = !!path.node.body.body.find(stmt => stmt.type === 'ReturnStatement' && stmt.argument);
+      endNode();
     },
-
-    VariableDeclarator(pathNode) {
-      const { id, init } = pathNode.node;
-      if (
-        (init?.type === 'ArrowFunctionExpression' || init?.type === 'FunctionExpression') &&
-        id?.type === 'Identifier' &&
-        exportedNames.has(id.name)
-      ) {
-        const { breakdown, totalComplexity } = computeComplexityBreakdown(pathNode);
-        const params = getParameters(init);
-        nodes.push({
-          repoId,
-          nodeId: `${filePath}::${id.name}`,
-          filePath,
-          module: moduleName,
-          startLine: pathNode.node.loc.start.line,
-          endLine: pathNode.node.loc.end.line,
-          type: 'function',
+    VariableDeclarator(path) {
+      const { id, init } = path.node;
+      if (id.type === 'Identifier' && init && ['ArrowFunctionExpression', 'FunctionExpression'].includes(init.type)
+          && exportedNames.has(id.name)) {
+        pushNode({
           name: id.name,
-          complexity: totalComplexity,
-          complexityBreakdown: breakdown,
-          calledFunctions: [],
-          calledBy: [],
+          type: 'function',
+          loc: path.node.loc,
           isExported: true,
-          parentName: null,
-          parameters: params,
+          params: getParameters(init),
           scopeLevel: 'top-level',
-          isAsync: !!init.async,
+          isAsync: init.async
         });
+        currentNode.complexityBreakdown = computeComplexityBreakdown(path.get('init'));
+        currentNode.complexity = currentNode.complexityBreakdown.totalComplexity;
+        path.traverse({ CallExpression: onCall, JSXOpeningElement: onJSX });
+        currentNode.returnsValue = !!(init.body && init.body.type === 'BlockStatement' && init.body.body.find(stmt => stmt.type === 'ReturnStatement' && stmt.argument));
+        endNode();
       }
-    },
 
-    ClassDeclaration(pathNode) {
-      const node = pathNode.node;
-      const name = node.id?.name;
-      if (!name || !exportedNames.has(name)) return;
-      const { breakdown, totalComplexity } = computeComplexityBreakdown(pathNode);
-      nodes.push({
-        repoId,
-        nodeId: `${filePath}::${name}`,
-        filePath,
-        module: moduleName,
-        startLine: node.loc.start.line,
-        endLine: node.loc.end.line,
-        type: 'class',
-        name,
-        complexity: totalComplexity,
-        complexityBreakdown: breakdown,
-        calledFunctions: [],
-        calledBy: [],
-        isExported: true,
-        parentName: null,
-        parameters: [],
-        scopeLevel: 'top-level',
-        isAsync: false,
-      });
-    },
-
-    ClassMethod(pathNode) {
-      const node = pathNode.node;
-      const name = node.key?.name;
-      if (!name) return;
-      const parentClass = pathNode.parentPath?.node?.id?.name || null;
-      const { breakdown, totalComplexity } = computeComplexityBreakdown(pathNode);
-      const params = getParameters(node);
-      nodes.push({
-        repoId,
-        nodeId: `${filePath}::${parentClass}::${name}`,
-        filePath,
-        module: moduleName,
-        startLine: node.loc.start.line,
-        endLine: node.loc.end.line,
-        type: 'method',
-        name,
-        complexity: totalComplexity,
-        complexityBreakdown: breakdown,
-        calledFunctions: [],
-        calledBy: [],
-        isExported: false,
-        parentName: parentClass,
-        parameters: params,
-        scopeLevel: 'class-method',
-        isAsync: !!node.async,
-      });
-    },
-
-    CallExpression(pathNode) {
-      const callee = pathNode.node.callee;
-      if (callee.type === 'Identifier') {
-        const fnName = callee.name;
-        nodes.forEach(n => {
-          if (n.name === fnName) {
-            n.calledFunctions.push(`${n.filePath}::${fnName}`);
+      // For GraphQL resolvers object pattern
+      if (id.name === 'resolvers' && init?.type === 'ObjectExpression') {
+        init.properties.forEach(container => {
+          if (container.value.type === 'ObjectExpression') {
+            const cont = container.key.name;
+            container.value.properties.forEach(fnProp => {
+              const fnName = fnProp.key.name;
+              const fnNode = fnProp.value;
+              if (['FunctionExpression', 'ArrowFunctionExpression'].includes(fnNode.type)) {
+                pushNode({
+                  name: `${cont}.${fnName}`,
+                  type: 'graphql-resolver',
+                  loc: fnNode.loc,
+                  isExported: true,
+                  params: getParameters(fnNode),
+                  scopeLevel: 'top-level',
+                  isAsync: fnNode.async
+                });
+                currentNode.complexityBreakdown = computeComplexityBreakdown(path.get('init'));
+                currentNode.complexity = currentNode.complexityBreakdown.totalComplexity;
+                fnProp.traverse({ CallExpression: onCall, JSXOpeningElement: onJSX });
+                endNode();
+              }
+            });
           }
         });
-        if (importsMap.has(fnName)) {
-          usedImports.add(fnName);
-        }
       }
     },
+    ClassDeclaration(path) {
+      const name = path.node.id?.name;
+      if (!name || !exportedNames.has(name)) return;
+      pushNode({ name, type: 'class', loc: path.node.loc, isExported: true });
+      endNode();
+    },
+    ClassMethod(path) {
+      const method = path.node.key.name;
+      const parent = path.parentPath.node.id?.name;
+      pushNode({
+        name: method,
+        type: 'method',
+        loc: path.node.loc,
+        isExported: false,
+        parentName: parent,
+        params: getParameters(path.node),
+        scopeLevel: 'class-method',
+        isAsync: path.node.async
+      });
+      currentNode.complexityBreakdown = computeComplexityBreakdown(path);
+      currentNode.complexity = currentNode.complexityBreakdown.totalComplexity;
+      path.traverse({ CallExpression: onCall, JSXOpeningElement: onJSX });
+      endNode();
+    },
 
-    JSXOpeningElement(pathNode) {
-      const nameNode = pathNode.node.name;
-      if (nameNode.type === 'JSXIdentifier') {
-        const componentName = nameNode.name;
-        if (importsMap.has(componentName)) {
-          usedImports.add(componentName);
+    // <== NEW: ExportDefaultDeclaration handler with full logic
+    ExportDefaultDeclaration(path) {
+      const decl = path.node.declaration;
+
+      if (decl.type === 'FunctionDeclaration') {
+        // Named or anonymous default exported function
+        const name = decl.id ? decl.id.name : 'default';
+        pushNode({
+          name,
+          type: 'function',
+          loc: decl.loc,
+          isExported: true,
+          params: getParameters(decl),
+          scopeLevel: 'top-level',
+          isAsync: decl.async,
+        });
+        currentNode.complexityBreakdown = computeComplexityBreakdown(path.get('declaration'));
+        currentNode.complexity = currentNode.complexityBreakdown.totalComplexity;
+        path.traverse({ CallExpression: onCall, JSXOpeningElement: onJSX });
+        endNode();
+      }
+      else if (decl.type === 'ClassDeclaration') {
+        const name = decl.id ? decl.id.name : 'default';
+        pushNode({
+          name,
+          type: 'class',
+          loc: decl.loc,
+          isExported: true,
+        });
+        endNode();
+      }
+      else if (decl.type === 'Identifier') {
+        // Just track the name for now; could be handled later by VariableDeclarator or FunctionDeclaration
+        exportedNames.add(decl.name);
+      }
+      else if (decl.type === 'ArrowFunctionExpression' || decl.type === 'FunctionExpression') {
+        // e.g., export default () => {}
+        pushNode({
+          name: 'default',
+          type: 'function',
+          loc: decl.loc,
+          isExported: true,
+          params: getParameters(decl),
+          scopeLevel: 'top-level',
+          isAsync: decl.async,
+        });
+        currentNode.complexityBreakdown = computeComplexityBreakdown(path.get('declaration'));
+        currentNode.complexity = currentNode.complexityBreakdown.totalComplexity;
+        path.traverse({ CallExpression: onCall, JSXOpeningElement: onJSX });
+        endNode();
+      }
+      else {
+        // Other export default cases can be handled here if needed
+      }
+    }
+  });
+
+  // Another pass to capture calls to router.<method> with handler refs
+  traverse(ast, {
+    CallExpression(path) {
+      const callee = path.node.callee;
+      if (callee.type === 'MemberExpression' && callee.object.name === 'router') {
+        const [, handler] = path.node.arguments;
+        if (handler?.type === 'Identifier' && currentNode) {
+          const src = importsMap.get(handler.name);
+          if (IGNORE_MODULES.has(src)) return;
+          const target = src ? `${resolveImportToPath(filePath, src)}::${handler.name}` : handler.name;
+          currentNode.calledFunctions.push(target);
+          currentNode.httpEndpoint = `${callee.property.name.toUpperCase()} ${path.node.arguments[0]?.value || ''}`;
         }
       }
     }
   });
 
-  // Add used imports as calledFunctions dependencies to all nodes in this file
-  for (const usedImportName of usedImports) {
-    const importedSource = importsMap.get(usedImportName);
-    nodes.forEach(n => {
-      n.calledFunctions.push(`${importedSource}::${usedImportName}`);
+  // Build reverse call links
+  const mapById = new Map(fileFunctions.map(n => [n.nodeId, n]));
+  fileFunctions.forEach(n => {
+    n.calledFunctions.forEach(c => {
+      if (mapById.has(c)) mapById.get(c).calledBy.push(n.nodeId);
     });
-  }
+  });
 
-  return nodes;
+  return fileFunctions;
 }
 
 module.exports = { collectSourceFiles, parseFile };

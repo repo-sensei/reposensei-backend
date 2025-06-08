@@ -19,7 +19,7 @@ const NodeSchema = new Schema({
   startLine: { type: Number, required: true },
   endLine: { type: Number, required: true },
 
-  type: { type: String, enum: ['function', 'class', 'method'], required: true },
+  type: { type: String, enum: ['function', 'class', 'method', 'graphql-resolver', 'next-data'], required: true },
   name: { type: String, required: true },
 
   complexity: { type: Number, required: true },
@@ -29,10 +29,18 @@ const NodeSchema = new Schema({
   calledBy: { type: [String], default: [] },
 
   isExported: { type: Boolean, default: false },
-  parentName: { type: String, default: null },
+  isAsync: { type: Boolean, default: false },
   parameters: { type: [String], default: [] },
   scopeLevel: { type: String, enum: ['top-level', 'class-method'], default: 'top-level' },
-  isAsync: { type: Boolean, default: false },
-});
+
+  // 🆕 Enhancements
+  returnsValue: { type: Boolean, default: false },
+  jsDocComment: { type: String, default: '' },
+  fileType: { type: String, enum: ['frontend', 'backend', 'shared', 'util', 'test'], default: 'shared' },
+  httpEndpoint: { type: String, default: '' }, // e.g., GET /api/users
+  invokesAPI: { type: Boolean, default: false }, // e.g., axios/fetch
+  invokesDBQuery: { type: Boolean, default: false }, // e.g., prisma/db/mongoose
+  relatedComponents: { type: [String], default: [] }, // For JSX references or UI trees
+}, { timestamps: true });
 
 module.exports = mongoose.model('Node', NodeSchema);
