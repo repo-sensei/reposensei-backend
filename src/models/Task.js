@@ -7,7 +7,9 @@ const TaskSchema = new Schema({
   description: { type: String, required: true },
   command: { type: String, required: true },
   fileLink: { type: String, default: null },
-  isCompleted: { type: Boolean, default: false }
+  isCompleted: { type: Boolean, default: false },
+ 
+
 });
 
 module.exports = mongoose.model('Task', TaskSchema);
