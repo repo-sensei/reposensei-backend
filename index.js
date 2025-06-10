@@ -10,6 +10,7 @@ const tasksRouter = require('./src/controllers/tasksController');
 const changeRouter = require('./src/controllers/changeController');
 const chatRouter = require('./src/controllers/chatController');
 const webhookRouter = require('./src/controllers/webhookController');
+const onboardingRouter = require('./src/controllers/onboardingController');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -25,7 +26,7 @@ app.use('/api/tasks', tasksRouter);
 app.use('/api/changes', changeRouter);
 app.use('/api/chat', chatRouter);
 app.use('/api/webhook', webhookRouter);
-
+app.use('/api/onboarding', onboardingRouter);
 app.use('/generated', express.static(path.join(__dirname, 'docs/generated')));
 
 // Start server

@@ -33,7 +33,7 @@ const NodeSchema = new Schema({
   parameters: { type: [String], default: [] },
   scopeLevel: { type: String, enum: ['top-level', 'class-method'], default: 'top-level' },
 
-  // 🆕 Enhancements
+  // Enhancements
   returnsValue: { type: Boolean, default: false },
   jsDocComment: { type: String, default: '' },
   fileType: { type: String, enum: ['frontend', 'backend', 'shared', 'util', 'test'], default: 'shared' },
