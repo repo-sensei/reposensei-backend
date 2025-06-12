@@ -144,14 +144,18 @@ async function fetchRefactorSuggestions(nodeId, repoPath) {
     return 'No snippet available';
   }
 
-  const promptAI = `Explain why this function is complex and suggest two refactorings in 200 words only:\n\n${snippet}`;
+  const trimmedSnippet = snippet.length > 2800 ? snippet.slice(0, 2800) + '\n// ...truncated' : snippet;
+
+  const promptAI = `Explain why this function is complex and suggest two refactorings in 200 words only:\n\n${trimmedSnippet}`;
 
   try {
     const res = await axios.post(
       `${process.env.PYTHON_BACKEND_URL}/analyze`,
       { prompt: promptAI }
     );
+
     return res.data.suggestions || 'No suggestions returned';
+    
   } catch (err) {
     console.error(`LLM analyze failed for node ${nodeId}:`, err.message);
     return 'Failed to get suggestions due to error';

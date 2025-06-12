@@ -11,9 +11,10 @@ router.get('/:repoId', async (req, res) => {
   try {
     const { repoId } = req.params;
     const sinceParam = req.query.since;
-    const sinceDate = sinceParam ? new Date(sinceParam) : new Date(Date.now() - 7 * 24 * 60 * 60 * 100);
-
+    const sinceDate = sinceParam ? new Date(sinceParam) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    
     const summary = await summarizeChanges(repoId, sinceDate);
+    
     return res.status(200).json({ success: true, summary });
   } catch (err) {
     console.error(err);
