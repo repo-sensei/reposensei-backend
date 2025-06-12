@@ -2,10 +2,12 @@ const CommitModel = require('../models/Commit');
 const axios = require('axios');
 
 async function summarizeChanges(repoId, sinceDate) {
+  
   const recentCommits = await CommitModel.find({
     repoId,
     date: { $gt: sinceDate }
   }).sort({ date: 1 }); // sort oldest -> newest
+
 
   if (recentCommits.length === 0) {
     return 'No new changes since last scan.';
@@ -49,14 +51,17 @@ Limit output to **around 500 words** or fewer.
 Do **not** repeat the original bullets—just summarize.
   `;
 
+  
   try {
    
     const res = await axios.post(
       `${process.env.PYTHON_BACKEND_URL}/summarize`,
       { prompt: promptAI }
     );
-   
+    console.log(res);
     return res.data.summary;
+    
+
   } catch (error) {
     console.error('Error calling Python backend summarizer:', error);
     throw error;

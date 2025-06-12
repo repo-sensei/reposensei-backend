@@ -6,6 +6,7 @@ const NodeModel = require('../models/Node');
 const CommitModel = require('../models/Commit');
 const { ensureRepoCloned, getRecentCommitsWithFiles } = require('../services/gitService');
 const { collectSourceFiles, parseFile } = require('../services/astService');
+
 const { upsertCodeEmbedding } = require('../services/vectorService');
 
 const router = express.Router();
@@ -58,6 +59,7 @@ router.post('/scan', async (req, res) => {
 
     // 4) AST‐parse all source files and insert nodes + embeddings
     const files = collectSourceFiles(repoPath);
+   
     console.log(`Collected ${files.length} source files`);
 
     for (const file of files) {

@@ -2,14 +2,9 @@ const NodeModel = require('../models/Node');
 const path = require('path');
 const fs = require('fs');
 
-/**
- * Generate Cytoscape-compatible graph JSON using relatedComponents.
- * Omits nodes that have no edges (isolated nodes).
- */
 async function generateCytoscapeGraph(repoId) {
   const nodes = await NodeModel.find({ repoId });
 
-  // Top 30 by complexity
   const topNodes = nodes
     .sort((a, b) => b.complexity - a.complexity)
     .slice(0, 30);
@@ -17,7 +12,6 @@ async function generateCytoscapeGraph(repoId) {
   const nodeMap = {};
   const elements = [];
 
-  // Collect unique modules (folders) for compound nodes
   const moduleMap = new Map();
 
   for (const node of topNodes) {
@@ -27,20 +21,23 @@ async function generateCytoscapeGraph(repoId) {
 
       elements.push({
         data: { id: modId, label: node.module },
-        classes: 'module', // style separately in frontend
+        classes: 'module',
       });
     }
   }
 
-  // Map nodes with ids and assign parent module
+  // Define modern dark theme complexity colors
+  const getNodeColor = (complexity) => {
+    if (complexity >= 15) return '#EF4444'; // soft red
+    if (complexity >= 8) return '#F59E0B';  // soft orange
+    return '#10B981'; // soft green
+  };
+
   for (const [index, node] of topNodes.entries()) {
     const nodeId = `N${index}_${node.name.replace(/[^a-zA-Z0-9]/g, '_')}`;
     nodeMap[node.nodeId] = nodeId;
 
-    const color =
-      node.complexity >= 15 ? 'lightcoral' :
-      node.complexity >= 8 ? 'gold' : 'lightgreen';
-
+    const color = getNodeColor(node.complexity);
     const parentModuleId = moduleMap.get(node.module);
 
     elements.push({
@@ -60,12 +57,17 @@ async function generateCytoscapeGraph(repoId) {
         relatedComponents: node.relatedComponents,
         tooltip: `Lines: ${node.startLine}-${node.endLine}\nScope: ${node.scopeLevel}`,
       },
-      // Correct CSS property key in kebab-case for Cytoscape
-      style: { 'background-color': color },
+      style: {
+        'background-color': '#1F2937',        // dark gray base
+        'border-color': color,                // accent border based on complexity
+        'border-width': 2,
+        'text-outline-color': '#111827',
+        'text-outline-width': 1,
+        color: '#F3F4F6',
+      },
     });
   }
 
-  // Create edges based on relatedComponents
   const edges = [];
   for (const node of topNodes) {
     const fromId = nodeMap[node.nodeId];
@@ -80,42 +82,40 @@ async function generateCytoscapeGraph(repoId) {
       const toId = nodeMap[relatedId];
       if (!toId) continue;
 
-      const toModule = relatedNode.module;
-      const color = fromModule !== toModule ? 'red' : 'green';
+      const isCrossModule = fromModule !== relatedNode.module;
 
       edges.push({
         data: {
           source: fromId,
           target: toId,
-          color,
-          relationship: fromModule !== toModule ? 'cross-module relation' : 'intra-module relation',
+          relationship: isCrossModule ? 'cross-module' : 'intra-module',
         },
-        // Correct CSS property key in kebab-case for Cytoscape
-        style: { 'line-color': color, width: 2 },
+        style: {
+          'line-color': '#6B7280',               // neutral gray
+          'target-arrow-color': '#6B7280',
+          'target-arrow-shape': 'triangle',
+          'line-style': 'dotted',
+          width: 1.5,
+        },
       });
     }
   }
 
-  // Filter nodes only connected by edges
   const connectedNodeIds = new Set();
   edges.forEach(e => {
     connectedNodeIds.add(e.data.source);
     connectedNodeIds.add(e.data.target);
   });
 
-  // Remove nodes that are not connected
   const finalElements = elements.filter(el => {
     if (el.data.id.startsWith('N')) {
       return connectedNodeIds.has(el.data.id);
     }
-    // Keep all module (folder) nodes
     return true;
   });
 
-  // Add edges after nodes
   finalElements.push(...edges);
 
-  // Save to file
   const outDir = path.join(__dirname, '../../docs/generated');
   await fs.promises.mkdir(outDir, { recursive: true });
   const safeId = repoId.replace(/\W+/g, '_');
