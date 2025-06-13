@@ -51,25 +51,89 @@ function resolveImportToPath(baseFile, importPath) {
   return null;
 }
 
+function getModuleName(filePath) {
+  const parts = filePath.split(path.sep);
+  const fileName = path.basename(filePath, path.extname(filePath));
+  
+  // Find relevant directory context
+  const relevantDirs = ['controllers', 'models', 'services', 'routes', 'middleware', 'components', 'pages', 'utils', 'lib', 'api'];
+  const dirIndex = parts.findIndex(part => relevantDirs.includes(part));
+  
+  if (dirIndex !== -1) {
+    return `${parts[dirIndex]}/${fileName}`;
+  }
+  
+  // Fallback to last directory + filename
+  return parts.length > 1 ? `${parts[parts.length - 2]}/${fileName}` : fileName;
+}
+
 function collectSourceFiles(dir) {
   let files = [];
+  console.log(`Collecting files from: ${dir}`);
+  
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
-    if (entry.isDirectory()) files = files.concat(collectSourceFiles(fullPath));
-    else if (/\.(js|jsx|ts|tsx)$/.test(entry.name)) files.push(fullPath);
+    if (entry.isDirectory()) {
+      // Skip common ignore directories
+      if (!['node_modules', '.git', '.next', 'dist', 'build'].includes(entry.name)) {
+        files = files.concat(collectSourceFiles(fullPath));
+      }
+    } else if (/\.(js|jsx|ts|tsx)$/.test(entry.name)) {
+      files.push(fullPath);
+    }
   }
+  
+  console.log(`Found ${files.length} source files in ${dir}`);
   return files;
 }
 
-function parseFile(filePath, repoId, moduleName) {
+function inferFileType(filePath, content = '') {
+  const normalizedPath = filePath.replace(/\\/g, '/').toLowerCase();
+  
+  // Check directory patterns first
+  if (/\/(pages|components|frontend|client|ui)\//.test(normalizedPath)) return 'frontend';
+  if (/\/(api|server|backend|controllers|routes|services|models|middleware)\//.test(normalizedPath)) return 'backend';
+  if (/\/(utils|helpers|lib|common|shared)\//.test(normalizedPath)) return 'util';
+  if (/\/(test|_tests_|spec)\//.test(normalizedPath) || /\.(test|spec)\.(js|ts|jsx|tsx)$/.test(normalizedPath)) return 'test';
+  
+  // Check file content for backend patterns
+  if (content.includes('express') || content.includes('app.get') || content.includes('app.post') || 
+      content.includes('router.') || content.includes('mongoose') || content.includes('prisma') ||
+      content.includes('sequelize') || content.includes('knex') || content.includes('req.') || 
+      content.includes('res.')) return 'backend';
+  
+  // Check for frontend patterns
+  if (content.includes('React') || content.includes('useState') || content.includes('useEffect') ||
+      content.includes('jsx') || content.includes('<div') || content.includes('Component')) return 'frontend';
+  
+  return 'shared';
+}
+
+function parseFile(filePath, repoId, providedModuleName = null) {
+  console.log(`Parsing file: ${filePath}`);
+  
   const content = fs.readFileSync(filePath, 'utf-8');
-  const ast = parser.parse(content, { sourceType: 'unambiguous', plugins: ['typescript', 'jsx'] });
+  const fileType = inferFileType(filePath, content);
+  
+  // Generate a more specific module name
+  const moduleName = providedModuleName || getModuleName(filePath);
+  
+  let ast;
+  try {
+    ast = parser.parse(content, { 
+      sourceType: 'unambiguous', 
+      plugins: ['typescript', 'jsx'] 
+    });
+  } catch (error) {
+    console.error(`Failed to parse ${filePath}:`, error.message);
+    return [];
+  }
 
   const fileFunctions = [];
   const exportedNames = new Set();
   const importsMap = new Map();
 
-  // First pass to collect imports and exported names (named & default identifiers)
+  // First pass to collect imports and exported names
   traverse(ast, {
     ImportDeclaration(path) {
       const src = path.node.source.value;
@@ -88,12 +152,14 @@ function parseFile(filePath, repoId, moduleName) {
   });
 
   let currentNode = null;
+  
   function pushNode(meta) {
     fileFunctions.push({
       repoId,
       nodeId: `${filePath}::${meta.name}`,
       filePath,
       module: moduleName,
+      fileName: path.basename(filePath, path.extname(filePath)),
       startLine: meta.loc.start.line,
       endLine: meta.loc.end.line,
       type: meta.type,
@@ -108,7 +174,7 @@ function parseFile(filePath, repoId, moduleName) {
       isAsync: !!meta.isAsync,
       returnsValue: false,
       jsDocComment: '',
-      fileType: inferFileType(filePath),
+      fileType: fileType,
       httpEndpoint: '',
       invokesAPI: false,
       invokesDBQuery: false,
@@ -116,21 +182,11 @@ function parseFile(filePath, repoId, moduleName) {
     });
     currentNode = fileFunctions[fileFunctions.length - 1];
   }
-  function endNode() { currentNode = null; }
-
-  function inferFileType(filePath) {
-    const normalizedPath = filePath.replace(/\\/g, '/'); // Handle Windows paths
-
-    if (/\/(pages|routes|components|frontend)\//.test(normalizedPath)) return 'frontend';
-    if (/\/(api|server|backend|controllers|routes)\//.test(normalizedPath)) return 'backend';
-    if (/\/(utils|helpers|lib|common)\//.test(normalizedPath)) return 'util';
-    if (/\/(test|__tests__)\//.test(normalizedPath) || /\.test\.(js|ts|jsx|tsx)$/.test(normalizedPath)) return 'test';
-    
-    return 'shared';
+  
+  function endNode() { 
+    currentNode = null; 
   }
 
-
-  // Your onCall and onJSX functions from before
   function onCall(path) {
     const callee = path.node.callee;
     if (callee.type === 'Identifier' && currentNode) {
@@ -158,40 +214,63 @@ function parseFile(filePath, repoId, moduleName) {
     }
   }
 
-  // Main AST traversal for function, variable, class, class methods
+  // Function to determine if we should process a function based on file type
+  function shouldProcessFunction(name, isExported, fileType) {
+    // For backend files, process ALL functions (exported or not)
+    if (fileType === 'backend') return true;
+    
+    // For frontend files, only process exported functions or Next.js data functions
+    if (fileType === 'frontend') {
+      return isExported || NEXT_DATA_FUNCS.has(name);
+    }
+    
+    // For other files, process exported functions
+    return isExported;
+  }
+
+  // Main AST traversal
   traverse(ast, {
     FunctionDeclaration(path) {
       const name = path.node.id?.name;
-      if (!name || (!exportedNames.has(name) && !NEXT_DATA_FUNCS.has(name))) return;
+      if (!name) return;
+      
+      const isExported = exportedNames.has(name);
+      if (!shouldProcessFunction(name, isExported, fileType)) return;
+      
       const type = NEXT_DATA_FUNCS.has(name) ? 'next-data' : 'function';
       pushNode({
         name,
         type,
         loc: path.node.loc,
-        isExported: exportedNames.has(name),
+        isExported,
         params: getParameters(path.node),
         scopeLevel: 'top-level',
         isAsync: path.node.async
       });
+      
       currentNode.complexityBreakdown = computeComplexityBreakdown(path);
       currentNode.complexity = currentNode.complexityBreakdown.totalComplexity;
       path.traverse({ CallExpression: onCall, JSXOpeningElement: onJSX });
       currentNode.returnsValue = !!path.node.body.body.find(stmt => stmt.type === 'ReturnStatement' && stmt.argument);
       endNode();
     },
+    
     VariableDeclarator(path) {
       const { id, init } = path.node;
-      if (id.type === 'Identifier' && init && ['ArrowFunctionExpression', 'FunctionExpression'].includes(init.type)
-          && exportedNames.has(id.name)) {
+      if (id.type === 'Identifier' && init && ['ArrowFunctionExpression', 'FunctionExpression'].includes(init.type)) {
+        const isExported = exportedNames.has(id.name);
+        if (!shouldProcessFunction(id.name, isExported, fileType)) return;
+        
         pushNode({
           name: id.name,
           type: 'function',
           loc: path.node.loc,
-          isExported: true,
+          isExported,
           params: getParameters(init),
           scopeLevel: 'top-level',
           isAsync: init.async
         });
+        
         currentNode.complexityBreakdown = computeComplexityBreakdown(path.get('init'));
         currentNode.complexity = currentNode.complexityBreakdown.totalComplexity;
         path.traverse({ CallExpression: onCall, JSXOpeningElement: onJSX });
@@ -199,7 +278,7 @@ function parseFile(filePath, repoId, moduleName) {
         endNode();
       }
 
-      // For GraphQL resolvers object pattern
+      // GraphQL resolvers object pattern
       if (id.name === 'resolvers' && init?.type === 'ObjectExpression') {
         init.properties.forEach(container => {
           if (container.value.type === 'ObjectExpression') {
@@ -227,15 +306,28 @@ function parseFile(filePath, repoId, moduleName) {
         });
       }
     },
+    
     ClassDeclaration(path) {
       const name = path.node.id?.name;
-      if (!name || !exportedNames.has(name)) return;
-      pushNode({ name, type: 'class', loc: path.node.loc, isExported: true });
+      if (!name) return;
+      
+      const isExported = exportedNames.has(name);
+      if (!shouldProcessFunction(name, isExported, fileType)) return;
+      
+      pushNode({ 
+        name, 
+        type: 'class', 
+        loc: path.node.loc, 
+        isExported 
+      });
       endNode();
     },
+    
     ClassMethod(path) {
       const method = path.node.key.name;
       const parent = path.parentPath.node.id?.name;
+      
+      // Always process class methods if we're processing the parent class
       pushNode({
         name: method,
         type: 'method',
@@ -246,18 +338,17 @@ function parseFile(filePath, repoId, moduleName) {
         scopeLevel: 'class-method',
         isAsync: path.node.async
       });
+      
       currentNode.complexityBreakdown = computeComplexityBreakdown(path);
       currentNode.complexity = currentNode.complexityBreakdown.totalComplexity;
       path.traverse({ CallExpression: onCall, JSXOpeningElement: onJSX });
       endNode();
     },
 
-    // <== NEW: ExportDefaultDeclaration handler with full logic
     ExportDefaultDeclaration(path) {
       const decl = path.node.declaration;
 
       if (decl.type === 'FunctionDeclaration') {
-        // Named or anonymous default exported function
         const name = decl.id ? decl.id.name : 'default';
         pushNode({
           name,
@@ -284,11 +375,9 @@ function parseFile(filePath, repoId, moduleName) {
         endNode();
       }
       else if (decl.type === 'Identifier') {
-        // Just track the name for now; could be handled later by VariableDeclarator or FunctionDeclaration
         exportedNames.add(decl.name);
       }
       else if (decl.type === 'ArrowFunctionExpression' || decl.type === 'FunctionExpression') {
-        // e.g., export default () => {}
         pushNode({
           name: 'default',
           type: 'function',
@@ -303,13 +392,10 @@ function parseFile(filePath, repoId, moduleName) {
         path.traverse({ CallExpression: onCall, JSXOpeningElement: onJSX });
         endNode();
       }
-      else {
-        // Other export default cases can be handled here if needed
-      }
     }
   });
 
-  // Another pass to capture calls to router.<method> with handler refs
+  // Capture router calls and HTTP endpoints
   traverse(ast, {
     CallExpression(path) {
       const callee = path.node.callee;
@@ -334,6 +420,7 @@ function parseFile(filePath, repoId, moduleName) {
     });
   });
 
+  console.log(`Extracted ${fileFunctions.length} functions from ${filePath} (${fileType}) as module: ${moduleName}`);
   return fileFunctions;
 }
 
