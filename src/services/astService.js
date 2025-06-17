@@ -188,22 +188,52 @@ function parseFile(filePath, repoId, providedModuleName = null) {
   }
 
   function onCall(path) {
-    const callee = path.node.callee;
-    if (callee.type === 'Identifier' && currentNode) {
-      const fn = callee.name;
-      if (!IGNORE_IMPORTS.has(fn) && (!importsMap.has(fn) || !IGNORE_MODULES.has(importsMap.get(fn)))) {
-        let target = fn;
-        if (importsMap.has(fn)) {
-          const src = importsMap.get(fn);
-          const rp = resolveImportToPath(filePath, src);
-          if (rp) target = `${rp}::${fn}`;
-          if (/axios|fetch/.test(fn)) currentNode.invokesAPI = true;
-          if (/prisma|mongoose|db/.test(src)) currentNode.invokesDBQuery = true;
-        }
-        currentNode.calledFunctions.push(target);
-      }
+  const callee = path.node.callee;
+  if (!currentNode) return;
+
+  let baseName, methodChain;
+  
+  // Case A: foo()
+  if (callee.type === 'Identifier') {
+    baseName    = callee.name;
+    methodChain = baseName;
+  
+  // Case B: obj.method(...) or obj.sub.obj2.fn(...)
+  } else if (callee.type === 'MemberExpression') {
+    // unwind object chain
+    const parts = [];
+    let obj = callee;
+    // collect property names from rightmost inward
+    while (obj.type === 'MemberExpression') {
+      parts.unshift(obj.property.name);
+      obj = obj.object;
     }
+    if (obj.type === 'Identifier') {
+      baseName    = obj.name;
+      parts.unshift(baseName);
+      methodChain = parts.join('.');
+    }
+  } else {
+    // ignore other call patterns
+    return;
   }
+
+  if (IGNORE_IMPORTS.has(baseName)) return;
+  if (importsMap.has(baseName) && IGNORE_MODULES.has(importsMap.get(baseName))) return;
+
+  // resolve to full nodeId
+  let target = `${filePath}::${methodChain}`;
+  if (importsMap.has(baseName)) {
+    const src = importsMap.get(baseName);
+    const rp  = resolveImportToPath(filePath, src);
+    if (rp) target = `${rp}::${methodChain}`;
+    if (/axios|fetch/.test(baseName)) currentNode.invokesAPI = true;
+    if (/prisma|mongoose|db/.test(src)) currentNode.invokesDBQuery = true;
+  }
+
+  currentNode.calledFunctions.push(target);
+}
+
 
   function onJSX(path) {
     const nm = path.node.name.name;
