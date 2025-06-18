@@ -130,7 +130,7 @@ async function generateDetailedOverview(modules, repoPath, role) {
       const context = block ? `Here is a key function from the file:\n\n${block}` : '';
       const prompt = `You are helping onboard a ${role} developer.\nExplain the purpose and role of the file "${file}" inside "${module.module}" module based on its content.\n${context}\n\nKeep it concise and useful for onboarding.`;
 
-      const summary =  "None" //await callLLM(prompt);
+      const summary =  await callLLM(prompt);
 
       html += `
 <li><strong>${file}</strong>
@@ -226,14 +226,20 @@ for (const fileResult of results) {
    
 
     const prompt = `Rephrase lint issue into an actionable task in short: "${issue.message}" in ${fileResult.filePath}:${issue.line}`;
-    //const desc = await callLLM(prompt);
+    const desc = await callLLM(prompt);
+    
+    const fileText = await fs.readFile(fileResult.filePath, 'utf8');
+    const fileLines = fileText.split('\n');
+
     tasks.push({
       title: `Fix ${path.basename(fileResult.filePath)}`,
-      description: "None",
+      description: desc,
       file: fileResult.filePath,
       line: issue.line,
       severity: issue.severity,
+      fileContent: fileLines,
     });
+
     issueCount++;
   }
 }
