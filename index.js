@@ -11,11 +11,12 @@ const changeRouter = require('./src/controllers/changeController');
 const chatRouter = require('./src/controllers/chatController');
 const webhookRouter = require('./src/controllers/webhookController');
 const onboardingRouter = require('./src/controllers/onboardingController');
+const personalBrandingRouter = require('./src/routes/personalBrandingRoutes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middlewares
+// Middlewaresapi/
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
@@ -28,6 +29,7 @@ app.use('/api/chat', chatRouter);
 app.use('/api/webhook', webhookRouter);
 app.use('/api/onboarding', onboardingRouter);
 app.use('/generated', express.static(path.join(__dirname, 'docs/generated')));
+api.use('/api/personal-branding', personalBrandingRouter);
 
 // Start server
 connectDB().then(() => {
