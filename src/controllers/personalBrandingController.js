@@ -1,10 +1,10 @@
-import { createResumeSection } from '../services/personalBrandingService';
+const { createResumeSection } = require('../services/personalBrandingService');
 
 /**
  * Controller: orchestrates fetching contributions, computing metrics,
  * generating AI bullets, formatting section, and responding.
  */
-export async function generateResumeSection(req, res) {
+async function generateResumeSection(req, res) {
   try {
     const { repoUrl, repoId, userId, role, projectName, startDate, endDate } = req.body;
     if (!repoUrl || !repoId || !userId) {
@@ -18,3 +18,7 @@ export async function generateResumeSection(req, res) {
     return res.status(500).json({ error: 'Failed to generate resume section' });
   }
 }
+
+module.exports = {
+  generateResumeSection
+};

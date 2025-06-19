@@ -29,7 +29,7 @@ app.use('/api/chat', chatRouter);
 app.use('/api/webhook', webhookRouter);
 app.use('/api/onboarding', onboardingRouter);
 app.use('/generated', express.static(path.join(__dirname, 'docs/generated')));
-api.use('/api/personal-branding', personalBrandingRouter);
+app.use('/api/personal-branding', personalBrandingRouter);
 
 // Start server
 connectDB().then(() => {

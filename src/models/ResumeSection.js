@@ -1,4 +1,4 @@
-import mongoose from 'mongoose';
+const mongoose = require('mongoose');
 
 const ResumeSectionSchema = new mongoose.Schema({
   cacheKey: { type: String, required: true, unique: true },
@@ -6,4 +6,4 @@ const ResumeSectionSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
-export default mongoose.model('ResumeSection', ResumeSectionSchema);
+module.exports = mongoose.model('ResumeSection', ResumeSectionSchema);

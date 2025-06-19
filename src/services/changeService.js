@@ -6,65 +6,66 @@ async function summarizeChanges(repoId, sinceDate) {
   const recentCommits = await CommitModel.find({
     repoId,
     date: { $gt: sinceDate }
-  }).sort({ date: 1 }); // sort oldest -> newest
-
+  }).sort({ date: 1 });
 
   if (recentCommits.length === 0) {
-    return 'No new changes since last scan.';
+    return { summary: {}, rawText: 'No new changes since last scan.' };
   }
 
-  // Build a detailed bullet list
   const changesText = recentCommits
     .map(c => {
       let bullet = `- ${c.message} (by ${c.author})`;
-      if (Array.isArray(c.filesChanged) && c.filesChanged.length > 0) {
-        // List up to 10 changed files; if more, summarize as "and X more..."
-        const maxFilesToShow = 10;
-        const shownFiles = c.filesChanged.slice(0, maxFilesToShow);
-        bullet += `\n  Files changed: ${shownFiles.join(', ')}`;
-        if (c.filesChanged.length > maxFilesToShow) {
-          bullet += `, and ${c.filesChanged.length - maxFilesToShow} more`;
+      if (c.filesChanged?.length) {
+        const files = c.filesChanged.slice(0, 10);
+        bullet += `\n  Files changed: ${files.join(', ')}`;
+        if (c.filesChanged.length > 10) {
+          bullet += `, and ${c.filesChanged.length - 10} more`;
         }
       }
       return bullet;
     })
     .join('\n');
 
-  const promptAI = `
-You are a senior software engineer writing concise yet detailed change summaries for developers. Below are recent commits since ${sinceDate.toDateString()} in the "${repoId}" repository:
+    const promptAI = `
+    You're a senior dev. Summarize these changes (since ${sinceDate.toDateString()} in "${repoId}") into 5 sections:
 
-${changesText}
+    - New Features
+    - Refactors
+    - Fixes & Performance
+    - Testing
+    - Documentation
 
-Summarize these changes with clear bullet points or short paragraphs. For each:
-- Explain what the contributor did, including key file-level actions.
-- If a React file (.jsx/.tsx) was added, say: "A new React component <ComponentName> was introduced for <feature>."
-- If API/server files changed, mention the endpoint or logic update.
-- Group similar changes by contributor or timeframe.
+    For each section, return a JSON array with:
+    - author
+    - files (array)
+    - type (new | refactor | fix | test | docs)
+    - description (how it may impact the project, plain text)
 
-Focus on:
-1. New features (functionality and location)
-2. Refactors (which files/modules were reorganized)
-3. Bug fixes/performance improvements (mention specific components if possible)
-4. New tests or documentation (if commit messages indicate so)
+    Changes:
+    ${changesText}
 
-Limit output to **around 500 words** or fewer.
-Do **not** repeat the original bullets—just summarize.
-  `;
+    Only return valid JSON.
+    `;
 
-  
   try {
-   
     const res = await axios.post(
       `${process.env.PYTHON_BACKEND_URL}/summarize`,
       { prompt: promptAI }
     );
-    console.log(res);
-    return res.data.summary;
-    
 
-  } catch (error) {
-    console.error('Error calling Python backend summarizer:', error);
-    throw error;
+  
+    const cleaned = res.data.summary
+      .trim()
+      .replace(/^```(?:json)?/, '')  // Remove starting ``` or ```json
+      .replace(/```$/, '')           // Remove ending ```
+      .trim();
+
+    const parsed = JSON.parse(cleaned);
+
+    return { summary: parsed, rawText: changesText };
+  } catch (err) {
+    console.error('Summarization failed:', err);
+    throw err;
   }
 }
 

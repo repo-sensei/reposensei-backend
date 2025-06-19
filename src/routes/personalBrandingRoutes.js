@@ -1,10 +1,8 @@
-import express from 'express';
-import { generateResumeSection } from '../controllers/personalBrandingController';
+const express = require('express');
+const { generateResumeSection } = require('../controllers/personalBrandingController');
 
 const router = express.Router();
 
-// Endpoint for Resume Section Generation
-// Expects JSON body: { repoUrl, repoId, userId, role?, projectName?, startDate?, endDate? }
-router.post('/personal-branding/resume-section', generateResumeSection);
+router.post('/resume-section', generateResumeSection);
 
-export default router;
+module.exports = router;

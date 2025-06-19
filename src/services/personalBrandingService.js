@@ -1,23 +1,28 @@
-import ResumeCache from '../models/ResumeSection';
-import { buildPrompt } from '../utils/promptBuilder';
-import { formatResumeSection } from '../utils/formatter';
-import axios from 'axios';
-import supabase from '../config/supabase';
+const ResumeCache = require('../models/ResumeSection');
+const { buildPrompt } = require('../utils/promptBuilder');
+const { formatResumeSection } = require('../utils/formatter');
+const axios = require('axios');
+const supabase = require('../config/supabase');
 
 /**
  * Get user's GitHub contributions using GitHub API
  */
 async function getGitHubContributions(repoUrl, username, startDate, endDate) {
   const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-  
+
   if (!GITHUB_TOKEN) {
     throw new Error('GITHUB_TOKEN not found. Required for personal branding feature.');
   }
 
-  // Extract repo info from repoUrl
-  const repoUrlParts = repoUrl.split('/');
-  const owner = repoUrlParts[3];
-  const repo = repoUrlParts[4];
+  const cleanedUrl = repoUrl.replace(/\/$/, ''); // remove trailing slash
+  const url = new URL(cleanedUrl);
+  let [owner, repo] = url.pathname.slice(1).split('/');
+  repo = repo.replace(/\.git$/, '');
+
+  if (!owner || !repo) {
+    throw new Error('Invalid GitHub repo URL. Expected format: https://github.com/{owner}/{repo}');
+  }
+
 
   const headers = {
     'Authorization': `token ${GITHUB_TOKEN}`,
@@ -25,47 +30,30 @@ async function getGitHubContributions(repoUrl, username, startDate, endDate) {
   };
 
   try {
-    // 1. Get user's commits in this repo
     const commitsResponse = await axios.get(
       `https://api.github.com/repos/${owner}/${repo}/commits`,
       {
         headers,
-        params: {
-          author: username,
-          since: startDate,
-          until: endDate,
-          per_page: 100
-        }
+        params: { author: username, since: startDate, until: endDate, per_page: 100 }
       }
     );
 
-    // 2. Get user's PRs in this repo
     const prsResponse = await axios.get(
       `https://api.github.com/repos/${owner}/${repo}/pulls`,
       {
         headers,
-        params: {
-          state: 'all',
-          author: username,
-          per_page: 100
-        }
+        params: { state: 'all', author: username, per_page: 100 }
       }
     );
 
-    // 3. Get user's issues in this repo
     const issuesResponse = await axios.get(
       `https://api.github.com/repos/${owner}/${repo}/issues`,
       {
         headers,
-        params: {
-          state: 'all',
-          creator: username,
-          per_page: 100
-        }
+        params: { state: 'all', creator: username, per_page: 100 }
       }
     );
 
-    // 4. Get detailed commit stats
     const commitsWithStats = await Promise.all(
       commitsResponse.data.map(async (commit) => {
         try {
@@ -97,10 +85,10 @@ async function getGitHubContributions(repoUrl, username, startDate, endDate) {
     return {
       commits: commitsWithStats,
       pullRequests: prsResponse.data,
-      issues: issuesResponse.data.filter(issue => !issue.pull_request), // Exclude PRs
+      issues: issuesResponse.data.filter(issue => !issue.pull_request),
       repoInfo: {
         name: repo,
-        owner: owner,
+        owner,
         fullName: `${owner}/${repo}`
       }
     };
@@ -116,25 +104,21 @@ async function getGitHubContributions(repoUrl, username, startDate, endDate) {
  */
 function calculateMetrics(contributions) {
   const { commits, pullRequests, issues } = contributions;
-  
+
   let totalAdded = 0, totalDeleted = 0;
   const dailyCount = {};
   const techCount = {};
   const prLinks = new Set();
 
-  // Process commits
   commits.forEach(commit => {
-    // LOC stats
     totalAdded += commit.stats.additions || 0;
     totalDeleted += commit.stats.deletions || 0;
 
-    // Daily commits
     const day = new Date(commit.date);
     day.setHours(0, 0, 0, 0);
     const key = day.toISOString().slice(0, 10);
     dailyCount[key] = (dailyCount[key] || 0) + 1;
 
-    // Tech distribution
     commit.files.forEach(file => {
       const ext = file.split('.').pop()?.toLowerCase();
       if (ext) {
@@ -143,25 +127,22 @@ function calculateMetrics(contributions) {
     });
   });
 
-  // Process PRs
   pullRequests.forEach(pr => {
     prLinks.add(pr.html_url);
   });
 
-  // Tech distribution %
   const totalTech = Object.values(techCount).reduce((a, b) => a + b, 0);
   const techDist = {};
   for (const [ext, cnt] of Object.entries(techCount)) {
     techDist[ext] = Math.round((cnt / totalTech) * 100);
   }
 
-  // Calculate cycle time for merged PRs
   const cycleTimes = pullRequests
     .filter(pr => pr.merged_at)
     .map(pr => {
       const created = new Date(pr.created_at);
       const merged = new Date(pr.merged_at);
-      return (merged - created) / (1000 * 3600 * 24); // days
+      return (merged - created) / (1000 * 3600 * 24);
     });
 
   const avgCycle = cycleTimes.length
@@ -182,39 +163,66 @@ function calculateMetrics(contributions) {
 }
 
 /**
+ * Helper function to get GitHub username from userId using Supabase
+ */
+async function getGitHubUsername(userId) {
+  try {
+    const { data: user, error } = await supabase.auth.admin.getUserById(userId);
+
+    if (error) {
+      console.error('Error fetching user from Supabase:', error);
+      throw new Error('Failed to fetch user profile');
+    }
+
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    const githubUsername = user.user?.user_metadata?.user_name ||
+                           user.user?.user_metadata?.preferred_username ||
+                           user.user?.user_metadata?.login;
+
+    if (!githubUsername) {
+      throw new Error('GitHub username not found in user profile. Please ensure you signed in with GitHub.');
+    }
+
+    return githubUsername;
+
+  } catch (error) {
+    console.error('Error in getGitHubUsername:', error);
+    throw new Error(`Failed to get GitHub username: ${error.message}`);
+  }
+}
+
+/**
  * Main service: fetch GitHub contributions, compute metrics, call LLM, cache & format.
  */
-export async function createResumeSection({ repoUrl, repoId, userId, role, projectName, startDate, endDate }) {
+async function createResumeSection({ repoUrl, repoId, userId, role, projectName, startDate, endDate }) {
   const cacheKey = `${userId}:${repoId}`;
+
   const cached = await ResumeCache.findOne({ cacheKey });
   if (cached && (Date.now() - cached.updatedAt) < 60 * 60 * 1000) {
     return cached.sectionText;
   }
 
   try {
-    // 1. Get GitHub username from userId using Supabase
     const username = await getGitHubUsername(userId);
-    
-    // 2. Fetch contributions from GitHub API
-    const contributions = await getGitHubContributions(repoUrl, username, startDate, endDate);
 
-    // 3. Calculate metrics from GitHub data
+    const contributions = await getGitHubContributions(repoUrl, username, startDate, endDate);
     const metrics = calculateMetrics(contributions);
 
-    // 4. Build AI prompt with contributions + metrics
     const prompt = buildPrompt(contributions.commits, metrics, { role, projectName, startDate, endDate });
 
-    // 5. Call Python LLM microservice
-    const { data } = await axios.post(
+    /*const { data } = await axios.post(
       `${process.env.PYTHON_BACKEND_URL}/resume`,
       { prompt }
-    );
-    const bullets = data.bullets;
-
-    // 6. Format resume markdown/text
+    );*/
+    
+   
+    const bullets = []; //data.bullets;
+    
     const sectionText = formatResumeSection({ role, projectName, startDate, endDate, bullets });
 
-    // 7. Cache result
     await ResumeCache.findOneAndUpdate(
       { cacheKey },
       { sectionText, updatedAt: Date.now() },
@@ -229,37 +237,6 @@ export async function createResumeSection({ repoUrl, repoId, userId, role, proje
   }
 }
 
-/**
- * Helper function to get GitHub username from userId using Supabase
- */
-async function getGitHubUsername(userId) {
-  try {
-    // Fetch user profile from Supabase
-    const { data: user, error } = await supabase.auth.admin.getUserById(userId);
-    
-    if (error) {
-      console.error('Error fetching user from Supabase:', error);
-      throw new Error('Failed to fetch user profile');
-    }
-
-    if (!user) {
-      throw new Error('User not found');
-    }
-
-    // Extract GitHub username from user metadata
-    // When users sign in with GitHub OAuth, Supabase stores the username in user_metadata
-    const githubUsername = user.user?.user_metadata?.user_name || 
-                          user.user?.user_metadata?.preferred_username ||
-                          user.user?.user_metadata?.login;
-
-    if (!githubUsername) {
-      throw new Error('GitHub username not found in user profile. Please ensure you signed in with GitHub.');
-    }
-
-    return githubUsername;
-
-  } catch (error) {
-    console.error('Error in getGitHubUsername:', error);
-    throw new Error(`Failed to get GitHub username: ${error.message}`);
-  }
-} 
+module.exports = {
+  createResumeSection
+};
