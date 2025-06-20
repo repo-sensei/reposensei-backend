@@ -194,6 +194,20 @@ async function getGitHubUsername(userId) {
   }
 }
 
+
+async function getContributionsAndMetrics({ repoUrl, userId, startDate, endDate }) {
+  try {
+    const username = await getGitHubUsername(userId);
+    const contributions = await getGitHubContributions(repoUrl, username, startDate, endDate);
+    const metrics = calculateMetrics(contributions);
+
+    return { contributions, metrics };
+  } catch (error) {
+    console.error('Error in getContributionsAndMetrics:', error);
+    throw error;
+  }
+}
+
 /**
  * Main service: fetch GitHub contributions, compute metrics, call LLM, cache & format.
  */
@@ -213,13 +227,13 @@ async function createResumeSection({ repoUrl, repoId, userId, role, projectName,
 
     const prompt = buildPrompt(contributions.commits, metrics, { role, projectName, startDate, endDate });
 
-    /*const { data } = await axios.post(
+    const { data } = await axios.post(
       `${process.env.PYTHON_BACKEND_URL}/resume`,
       { prompt }
-    );*/
+    );
     
    
-    const bullets = []; //data.bullets;
+    const bullets = data.bullets;
     
     const sectionText = formatResumeSection({ role, projectName, startDate, endDate, bullets });
 
@@ -238,5 +252,6 @@ async function createResumeSection({ repoUrl, repoId, userId, role, projectName,
 }
 
 module.exports = {
-  createResumeSection
+  createResumeSection,
+  getContributionsAndMetrics
 };

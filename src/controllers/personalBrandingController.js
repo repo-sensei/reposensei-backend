@@ -1,4 +1,4 @@
-const { createResumeSection } = require('../services/personalBrandingService');
+const { createResumeSection, getContributionsAndMetrics  } = require('../services/personalBrandingService');
 
 /**
  * Controller: orchestrates fetching contributions, computing metrics,
@@ -19,6 +19,22 @@ async function generateResumeSection(req, res) {
   }
 }
 
+async function getGitHubInsights(req, res) {
+  try {
+    const { repoUrl, userId, startDate, endDate } = req.body;
+    if (!repoUrl || !userId) {
+      return res.status(400).json({ error: 'repoUrl and userId are required' });
+    }
+
+    const { contributions, metrics } = await getContributionsAndMetrics({ repoUrl, userId, startDate, endDate });
+    return res.status(200).json({ contributions, metrics });
+  } catch (err) {
+    console.error('Error in getGitHubInsights:', err);
+    return res.status(500).json({ error: 'Failed to fetch GitHub insights' });
+  }
+}
+
 module.exports = {
-  generateResumeSection
+  generateResumeSection,
+  getGitHubInsights
 };
