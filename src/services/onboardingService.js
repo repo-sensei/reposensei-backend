@@ -5,6 +5,7 @@ const path = require('path');
 const fs = require('fs').promises;
 const os = require('os');
 const { ESLint } = require('eslint');
+const sanitizeCode = require('../utils/sanitizeCode');
 
 // Role-to-directory mappings
 const roleDirs = {
@@ -124,10 +125,12 @@ async function generateDetailedOverview(modules, repoPath, role) {
 
       // Extract first function block (for context)
       const functionRegex = /(const|let|var)?\s*\w+\s*=\s*(async\s*)?\(?[\w\s,]*\)?\s*=>\s*{[\s\S]*?}|function\s+\w+\s*\([^)]*\)\s*{[\s\S]*?}/g;
+      
 
       const block = (content.match(functionRegex) || [])[0];
+      const safeCode = sanitizeCode(block);
 
-      const context = block ? `Here is a key function from the file:\n\n${block}` : '';
+      const context = safeCode ? `Here is a key function from the file:\n\n${safeCode}` : '';
       const prompt = `You are helping onboard a ${role} developer.\nExplain the purpose and role of the file "${file}" inside "${module.module}" module based on its content.\n${context}\n\nKeep it concise and useful for onboarding.`;
 
       const summary =  await callLLM(prompt);
@@ -225,7 +228,7 @@ for (const fileResult of results) {
     if (issueCount >= MAX_TOTAL_ISSUES) break;
    
 
-    const prompt = `Rephrase lint issue into an actionable task in short: "${issue.message}" in ${fileResult.filePath}:${issue.line}`;
+    const prompt = `Rephrase lint issue into an actionable task : "${issue.message}" in ${fileResult.filePath}:${issue.line}`;
     const desc = await callLLM(prompt);
     
     const fileText = await fs.readFile(fileResult.filePath, 'utf8');
