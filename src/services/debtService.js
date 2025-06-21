@@ -3,6 +3,7 @@ const fs = require('fs');
 const axios = require('axios');
 const NodeModel = require('../models/Node'); 
 const HotspotSnapshotModel = require('../models/HotspotSnapshot');
+const sanitizeCode = require('../utils/sanitizeCode');
 
 const WEIGHTS = {
   complexity: 0.5,
@@ -145,8 +146,10 @@ async function fetchRefactorSuggestions(nodeId, repoPath) {
   }
 
   const trimmedSnippet = snippet.length > 2800 ? snippet.slice(0, 2800) + '\n// ...truncated' : snippet;
+  const safeCode = sanitizeCode(trimmedSnippet);
+  
 
-  const promptAI = `Explain why this function is complex and suggest two refactorings in 200 words only:\n\n${trimmedSnippet}`;
+  const promptAI = `Explain why this function is complex and suggest two refactorings in 200 words only:\n\n${safeCode}`;
 
   try {
     const res = await axios.post(
