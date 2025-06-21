@@ -232,6 +232,7 @@ async function createResumeSection({ repoUrl, repoId, userId, role, projectName,
       { prompt }
     );
     
+    console.log(data);
    
     const bullets = data.bullets;
     
