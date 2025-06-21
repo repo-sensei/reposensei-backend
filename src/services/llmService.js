@@ -7,6 +7,7 @@ async function callLLM(prompt) {
     { prompt }
   );
    if (response.data.success) {
+   
     return response.data.summary;
   } else {
     throw new Error(response.data.error || 'Unknown error from LLM backend');
