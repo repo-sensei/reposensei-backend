@@ -3,17 +3,25 @@ const { buildPrompt } = require('../utils/promptBuilder');
 const { formatResumeSection } = require('../utils/formatter');
 const axios = require('axios');
 const supabase = require('../config/supabase');
+const fs = require('fs');
+
+// Read GitHub token from Docker secret
+let GITHUB_TOKEN;
+try {
+  GITHUB_TOKEN = fs.readFileSync('/run/secrets/github_token', 'utf8').trim();
+} catch (error) {
+  // Fallback to environment variable for development
+  GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+}
+
+if (!GITHUB_TOKEN) {
+  throw new Error('GITHUB_TOKEN not found. Required for personal branding feature.');
+}
 
 /**
  * Get user's GitHub contributions using GitHub API
  */
 async function getGitHubContributions(repoUrl, username, startDate, endDate) {
-  const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-
-  if (!GITHUB_TOKEN) {
-    throw new Error('GITHUB_TOKEN not found. Required for personal branding feature.');
-  }
-
   const cleanedUrl = repoUrl.replace(/\/$/, ''); // remove trailing slash
   const url = new URL(cleanedUrl);
   let [owner, repo] = url.pathname.slice(1).split('/');

@@ -1,4 +1,19 @@
 import simpleGit from 'simple-git';
+const axios = require('axios');
+const fs = require('fs');
+
+// Read GitHub token from Docker secret
+let GITHUB_TOKEN;
+try {
+  GITHUB_TOKEN = fs.readFileSync('/run/secrets/github_token', 'utf8').trim();
+} catch (error) {
+  // Fallback to environment variable for development
+  GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+}
+
+if (!GITHUB_TOKEN) {
+  console.warn('GITHUB_TOKEN not found. Falling back to commit message parsing.');
+}
 
 /**
  * Get PRs associated with a commit using GitHub API
