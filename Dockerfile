@@ -2,6 +2,9 @@ FROM node:18-alpine
 
 WORKDIR /usr/src/app
 
+# Install Git (required for repository cloning)
+RUN apk add --no-cache git
+
 # Copy package files
 COPY package*.json ./
 

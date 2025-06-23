@@ -1,5 +1,6 @@
 const CommitModel = require('../models/Commit');
 const axios = require('axios');
+const fs = require('fs');
 
 async function summarizeChanges(repoId, sinceDate) {
   
@@ -54,15 +55,29 @@ async function summarizeChanges(repoId, sinceDate) {
     );
 
   
-    const cleaned = res.data.summary
-      .trim()
-      .replace(/^```(?:json)?/, '')  // Remove starting ``` or ```json
-      .replace(/```$/, '')           // Remove ending ```
-      .trim();
+    let summary;
+    let cleaned = null;
+    try {
+      // 1. Extract the summary string
+      let summaryStr = res.data.summary;
+      fs.writeFileSync('/tmp/raw_summary.txt', summaryStr);
+      console.log('Raw summary string length:', summaryStr.length);
+      console.log('Raw summary string:', summaryStr);
 
-    const parsed = JSON.parse(cleaned);
+      // 2. Clean up the string: remove all code block markers and trim whitespace/newlines
+      cleaned = summaryStr
+        .replace(/```json|```/gi, '') // Remove all code block markers
+        .trim();
 
-    return { summary: parsed, rawText: changesText };
+      console.log('Cleaned summary string:', cleaned);
+
+      summary = JSON.parse(cleaned);
+    } catch (err) {
+      console.error('Failed to parse summary JSON:', err, '\nFull cleaned string:', cleaned);
+      throw err;
+    }
+
+    return { summary: summary, rawText: changesText };
   } catch (err) {
     console.error('Summarization failed:', err);
     throw err;
